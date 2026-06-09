@@ -402,14 +402,42 @@ export default defineContentScript({
       editBtn.parentElement.appendChild(tb);
     }
 
-    /* ───────── 起動 ───────── */
+    /* ───────── 起動 ─────────
+     * SPA の再描画でボタンが消えても復活させ、詳細パネルが開いたらツールバー注入。
+     *
+     * 注意: observer の中で DOM を書き換える（updateButtons の textContent 等）と、
+     * その変更自体が再び observer を発火させ無限ループ→ページが固まる。
+     * これを防ぐため:
+     *   1) 自分のUI内だけの変化は無視する（自己発火カット）
+     *   2) rAF でデバウンスし、1フレーム1回に集約する
+     */
+    const ownSelector = `#${PREFIX}-fab, #${PREFIX}-dialog`;
+
+    function isOwnMutation(record: MutationRecord): boolean {
+      const t = record.target;
+      const el = t instanceof Element ? t : t.parentElement;
+      return !!el && !!el.closest(ownSelector);
+    }
+
+    let syncScheduled = false;
+    function scheduleSync(): void {
+      if (syncScheduled) return;
+      syncScheduled = true;
+      requestAnimationFrame(() => {
+        syncScheduled = false;
+        ensureButtons();
+        tryInjectToolbar();
+        updateButtons();
+      });
+    }
+
     ensureButtons();
     tryInjectToolbar();
 
-    const observer = new MutationObserver(() => {
-      ensureButtons();
-      tryInjectToolbar();
-      updateButtons();
+    const observer = new MutationObserver((records) => {
+      // すべて自分のUI内の変化なら無視（自己ループ防止）
+      if (records.every(isOwnMutation)) return;
+      scheduleSync();
     });
     observer.observe(document.body, { childList: true, subtree: true });
   },
