@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>ご予約カルテ — ラキ</title>
+<title>ご予約カルテ — ミル</title>
 <style>
   @page { size: A4; margin: 10mm; }
   * { box-sizing: border-box; }
@@ -13,7 +13,9 @@
   }
   .karte {
     width: 190mm; margin: 0 auto; padding: 4mm 0;
+    break-after: page; page-break-after: always;
   }
+  .karte.last { break-after: auto; page-break-after: auto; }
   .karte-header {
     display: flex; align-items: baseline; justify-content: space-between;
     border-bottom: 2px solid #333; padding-bottom: 4px; margin-bottom: 6px;
@@ -41,20 +43,23 @@
   .blank { display: inline-block; min-width: 60px; border-bottom: 1px dotted #aaa; }
   .blank-line { min-height: 14px; border-bottom: 1px dotted #aaa; }
   .detail-item { padding: 1px 0; }
+  .memo-space { min-height: 18mm; }
+  .memo-space .blank-line { min-height: 16px; }
   .big { font-size: 14px; font-weight: 600; }
   .muted { color: #666; font-size: 11px; }
   .note { font-size: 10px; color: #888; margin-top: 4px; }
   @media screen {
     body { background: #ddd; padding: 20px 0; }
-    .karte { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+    .karte { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.2); margin-bottom: 20px; }
   }
 </style>
 </head>
 <body>
-  <div class="karte">
+
+  <div class="karte last">
     <div class="karte-header">
       <h1>ご予約カルテ</h1>
-      <div class="code">予約番号 18afbd17</div>
+      <div class="code">予約番号 3c22032b</div>
     </div>
 
     
@@ -80,7 +85,7 @@
     <table class="karte-table">
       <tr>
         <th class="label">名前</th>
-        <td class="big">ラキ</td>
+        <td class="big">ミル</td>
         <th class="label">性別</th>
         <td>
           <span class="cb">■</span>♂
@@ -91,7 +96,7 @@
         <th class="label">犬種</th>
         <td>チワワ</td>
         <th class="label">年齢</th>
-        <td>1歳</td>
+        <td>11歳</td>
       </tr>
     </table>
 
@@ -160,7 +165,17 @@
       </tr>
       <tr>
         <th class="label">備考</th>
-        <td colspan="3">トリミングあり。</td>
+        <td colspan="3">シャンプーあり</td>
+      </tr>
+      <tr>
+        <th class="label">メモ<br><span class="muted">(手書き)</span></th>
+        <td colspan="3">
+          <div class="memo-space">
+            <div class="blank-line"></div>
+            <div class="blank-line"></div>
+            <div class="blank-line"></div>
+          </div>
+        </td>
       </tr>
     </table>
 
@@ -168,15 +183,15 @@
       <table class="karte-table contact">
         <tr>
           <th class="label">お客様</th>
-          <td colspan="3">有泉 太郎</td>
+          <td colspan="3">有泉 チャンプ・ミル</td>
         </tr>
         <tr>
           <th class="label">ご住所</th>
-          <td colspan="3">〒150-0001 東京都渋谷区1-2-3</td>
+          <td colspan="3">〒140-0013 東京都品川区南大井2-10-6-2205</td>
         </tr>
         <tr>
           <th class="label">お電話</th>
-          <td colspan="3">090-0000-0000</td>
+          <td colspan="3">0337648457 / 09025253292</td>
         </tr>
       </table>
 
