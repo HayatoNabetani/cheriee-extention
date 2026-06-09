@@ -1,16 +1,22 @@
 import {
   KARTE_MESSAGE_SOURCE,
+  isFetchRequestMessage,
   type ScheduleCapturedMessage,
+  type ScheduleListMessage,
+  type FetchDoneMessage,
   type CherieeScheduleResponse,
 } from '@/lib/types';
 
 /**
  * MAINワールド。ページの fetch / XMLHttpRequest をラップし、
- * `GET /v2/companies/{companyId}/schedules/{数値id}` のレスポンスを横取りして
- * window.postMessage で ISOLATED 側 (ui.content) へ渡す。
+ * シェリーAPIのレスポンスを横取りして window.postMessage で ISOLATED 側へ渡す。
  *
- * パッシブキャプチャ: ページの正規リクエストに相乗りするため、JWT を自前で
- * 抜き出す・保存する必要がない。トークン/PII は外部送信・永続化しない。
+ *  - 詳細: `GET /v2/companies/{companyId}/schedules/{数値id}` → 'schedule-response'
+ *  - 一覧: `GET /v2/companies/{companyId}/schedules?...`      → 'schedule-list'（ID群）
+ *
+ * さらに、ISOLATED からの 'fetch-request' を受けて、横取りで控えた Bearer トークンと
+ * companyId を使い詳細APIを再取得する（「全て印刷」用）。ページ自身のオリジンからの
+ * fetch なので追加の host 権限は不要。トークン/PII は外部送信・永続化しない。
  */
 export default defineContentScript({
   matches: ['https://cheriee.biz/*'],
@@ -18,9 +24,20 @@ export default defineContentScript({
   runAt: 'document_start',
   world: 'MAIN',
   main() {
-    // /v2/companies/{companyId}/schedules/{数値id} にマッチ（末尾やクエリも許容）
-    const SCHEDULE_RE =
-      /\/v2\/companies\/[^/]+\/schedules\/(\d+)(?:[/?#]|$)/;
+    const ORIGIN = window.location.origin;
+    // /v2/companies/{companyId}/schedules/{数値id}
+    const SCHEDULE_RE = /\/v2\/companies\/([^/]+)\/schedules\/(\d+)(?:[/?#]|$)/;
+    // /v2/companies/{companyId}/schedules（末尾やクエリのみ。/{id} は含まない）
+    const LIST_RE = /\/v2\/companies\/([^/]+)\/schedules(?:[/?#]|$)/;
+
+    // 再取得に使うため、直近に見た会社IDとトークンを保持（メモリのみ）。
+    let lastCompanyId: string | undefined;
+    let lastAuth: string | undefined;
+
+    function rememberCreds(companyId?: string, auth?: string): void {
+      if (companyId) lastCompanyId = companyId;
+      if (auth) lastAuth = auth;
+    }
 
     function emit(
       scheduleId: string,
@@ -36,14 +53,84 @@ export default defineContentScript({
         url,
         auth,
       };
-      // origin を明示して同一オリジンへのみ送信
-      window.postMessage(msg, window.location.origin);
+      window.postMessage(msg, ORIGIN);
     }
 
-    function matchScheduleUrl(url: string | undefined): string | null {
+    function emitList(ids: string[]): void {
+      if (ids.length === 0) return;
+      const msg: ScheduleListMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'schedule-list',
+        ids,
+      };
+      window.postMessage(msg, ORIGIN);
+    }
+
+    function detailMatch(url: string | undefined): {
+      companyId: string;
+      id: string;
+    } | null {
       if (!url) return null;
       const m = SCHEDULE_RE.exec(url);
+      return m && m[1] && m[2] ? { companyId: m[1], id: m[2] } : null;
+    }
+
+    function listMatch(url: string | undefined): string | null {
+      if (!url) return null;
+      // 詳細(/{id})は除外
+      if (SCHEDULE_RE.test(url)) return null;
+      const m = LIST_RE.exec(url);
       return m && m[1] ? m[1] : null;
+    }
+
+    /** 一覧レスポンス本体から予約ID配列を抽出（配列 or {data/schedules/items/...:[]}） */
+    function extractListIds(data: unknown): string[] {
+      let arr: unknown[] | null = null;
+      if (Array.isArray(data)) {
+        arr = data;
+      } else if (data && typeof data === 'object') {
+        for (const key of ['data', 'schedules', 'items', 'results', 'rows', 'list']) {
+          const v = (data as Record<string, unknown>)[key];
+          if (Array.isArray(v)) {
+            arr = v;
+            break;
+          }
+        }
+      }
+      if (!arr) return [];
+      const ids: string[] = [];
+      for (const item of arr) {
+        if (item && typeof item === 'object') {
+          const id = (item as Record<string, unknown>).id;
+          if (typeof id === 'number') ids.push(String(id));
+          else if (typeof id === 'string' && /^\d+$/.test(id)) ids.push(id);
+        }
+      }
+      return ids;
+    }
+
+    /** 横取りした生テキスト/JSONを詳細 or 一覧として処理 */
+    function handleBody(url: string | undefined, parse: () => unknown): void {
+      const detail = detailMatch(url);
+      if (detail) {
+        rememberCreds(detail.companyId, undefined);
+        try {
+          const data = parse() as CherieeScheduleResponse;
+          if (data) emit(detail.id, data, url, lastAuth);
+        } catch {
+          /* JSONでない/解析失敗は無視 */
+        }
+        return;
+      }
+      const listCompany = listMatch(url);
+      if (listCompany) {
+        rememberCreds(listCompany, undefined);
+        try {
+          emitList(extractListIds(parse()));
+        } catch {
+          /* 一覧でない/解析失敗は無視 */
+        }
+      }
     }
 
     function authFromHeaders(
@@ -55,12 +142,9 @@ export default defineContentScript({
           return headers.get('authorization') ?? undefined;
         }
         if (Array.isArray(headers)) {
-          const hit = headers.find(
-            ([k]) => k.toLowerCase() === 'authorization',
-          );
+          const hit = headers.find(([k]) => k.toLowerCase() === 'authorization');
           return hit?.[1];
         }
-        // Record 形式
         for (const [k, v] of Object.entries(headers)) {
           if (k.toLowerCase() === 'authorization') return String(v);
         }
@@ -88,24 +172,21 @@ export default defineContentScript({
 
       const promise = origFetch.apply(this, args);
 
-      const scheduleId = matchScheduleUrl(url);
-      if (scheduleId) {
+      if (detailMatch(url) || listMatch(url)) {
         const auth =
           authFromHeaders(init?.headers) ??
           (input instanceof Request
             ? input.headers.get('authorization') ?? undefined
             : undefined);
+        rememberCreds(undefined, auth);
         promise
           .then((res) => {
-            // 本体を消費しないよう clone してから読む
             res
               .clone()
-              .json()
-              .then((data: CherieeScheduleResponse) =>
-                emit(scheduleId, data, url, auth),
-              )
+              .text()
+              .then((text) => handleBody(url, () => JSON.parse(text)))
               .catch(() => {
-                /* JSONでないレスポンスは無視 */
+                /* 本文読めず無視 */
               });
           })
           .catch(() => {
@@ -144,32 +225,81 @@ export default defineContentScript({
     ) {
       if (name.toLowerCase() === 'authorization') {
         this.__cheriee_auth = value;
+        rememberCreds(undefined, value);
       }
       return origSetHeader.call(this, name, value);
     };
 
     proto.send = function (this: PatchedXHR, ...args: unknown[]) {
-      const scheduleId = matchScheduleUrl(this.__cheriee_url);
-      if (scheduleId) {
+      const url = this.__cheriee_url;
+      if (detailMatch(url) || listMatch(url)) {
         this.addEventListener('load', () => {
-          try {
-            const rt = this.responseType;
-            let data: CherieeScheduleResponse | null = null;
-            if (rt === '' || rt === 'text') {
-              data = JSON.parse(this.responseText);
-            } else if (rt === 'json') {
-              data = this.response as CherieeScheduleResponse;
-            }
-            if (data) {
-              emit(scheduleId, data, this.__cheriee_url, this.__cheriee_auth);
-            }
-          } catch {
-            /* JSONでない/解析失敗は無視 */
+          rememberCreds(undefined, this.__cheriee_auth);
+          const rt = this.responseType;
+          if (rt === '' || rt === 'text') {
+            handleBody(url, () => JSON.parse(this.responseText));
+          } else if (rt === 'json') {
+            handleBody(url, () => this.response);
           }
         });
       }
       // @ts-expect-error 可変長を原関数へ素通し
       return origSend.apply(this, args);
     };
+
+    /* ───────── 詳細の再取得（「全て印刷」用） ─────────
+     * ISOLATED からの依頼を受け、控えたトークン/companyId で詳細APIを叩く。
+     * 取得結果は通常の 'schedule-response' として流す（ui側でキャッシュされる）。 */
+    function postDone(ids: string[], errors: number, reason?: 'no-token'): void {
+      const msg: FetchDoneMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'fetch-done',
+        ids,
+        errors,
+        reason,
+      };
+      window.postMessage(msg, ORIGIN);
+    }
+
+    async function refetch(ids: string[]): Promise<void> {
+      const companyId = lastCompanyId;
+      const token = lastAuth;
+      if (!companyId || !token) {
+        postDone(ids, ids.length, 'no-token');
+        return;
+      }
+      let errors = 0;
+      const queue = ids.slice();
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const id = queue.shift();
+          if (id === undefined) return;
+          try {
+            const res = await origFetch(
+              `https://api.cheriee.jp/v2/companies/${companyId}/schedules/${id}`,
+              { headers: { Authorization: token, 'Accept-Language': 'ja' } },
+            );
+            if (!res.ok) {
+              errors++;
+              continue;
+            }
+            const data = (await res.json()) as CherieeScheduleResponse;
+            emit(id, data, res.url, token);
+          } catch {
+            errors++;
+          }
+        }
+      };
+      // 同時実行は控えめに（最大5並列）
+      const n = Math.min(5, Math.max(1, ids.length));
+      await Promise.all(Array.from({ length: n }, () => worker()));
+      postDone(ids, errors);
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.source !== window || event.origin !== ORIGIN) return;
+      if (!isFetchRequestMessage(event.data)) return;
+      void refetch(event.data.ids);
+    });
   },
 });

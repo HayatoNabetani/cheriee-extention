@@ -112,3 +112,61 @@ export function isScheduleCapturedMessage(
     m.data !== null
   );
 }
+
+/** 一覧API横取りで得た予約IDの集合（MAIN → ISOLATED） */
+export interface ScheduleListMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'schedule-list';
+  /** 一覧に含まれる予約ID（文字列化済み） */
+  ids: string[];
+}
+
+export function isScheduleListMessage(
+  value: unknown,
+): value is ScheduleListMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return (
+    m.source === KARTE_MESSAGE_SOURCE &&
+    m.type === 'schedule-list' &&
+    Array.isArray(m.ids)
+  );
+}
+
+/** 詳細の再取得依頼（ISOLATED → MAIN）。保存済みトークンで MAIN がfetchする。 */
+export interface FetchRequestMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'fetch-request';
+  ids: string[];
+}
+
+export function isFetchRequestMessage(
+  value: unknown,
+): value is FetchRequestMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return (
+    m.source === KARTE_MESSAGE_SOURCE &&
+    m.type === 'fetch-request' &&
+    Array.isArray(m.ids)
+  );
+}
+
+/** 再取得の完了通知（MAIN → ISOLATED） */
+export interface FetchDoneMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'fetch-done';
+  ids: string[];
+  /** 取得失敗件数 */
+  errors: number;
+  /** トークン/会社ID未取得などで実行できなかった場合の理由 */
+  reason?: 'no-token';
+}
+
+export function isFetchDoneMessage(
+  value: unknown,
+): value is FetchDoneMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return m.source === KARTE_MESSAGE_SOURCE && m.type === 'fetch-done';
+}

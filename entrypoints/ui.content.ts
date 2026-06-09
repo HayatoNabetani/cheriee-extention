@@ -1,13 +1,21 @@
-import { isScheduleCapturedMessage, type ScheduleCapturedMessage } from '@/lib/types';
+import {
+  isScheduleCapturedMessage,
+  isScheduleListMessage,
+  isFetchDoneMessage,
+  type ScheduleCapturedMessage,
+  type FetchRequestMessage,
+  KARTE_MESSAGE_SOURCE,
+} from '@/lib/types';
 import { mapResponseToKarte, type Karte } from '@/lib/mapResponseToKarte';
 import { renderKarte, renderKartes } from '@/lib/renderKarte';
 
 /**
  * ISOLATEDワールド。interceptor(MAIN) が横取りしたレスポンスを受信してキャッシュし、
- * 予約詳細に「🖨 印刷」「🖨 一括印刷」ボタンを出す。
+ * 予約に「🖨 印刷」「🖨 全て印刷」ボタンを出す。
  *
  * - 単票印刷: 現在開いている予約をカルテ印刷。
- * - 一括印刷: これまでに開いた（＝キャッシュ済みの）予約から選んでまとめて印刷。
+ * - 全て印刷: 一覧APIで把握した全予約を、未取得分は保存済みトークンで自動再取得して
+ *   から、全件チェック済みの選択ダイアログ経由でまとめて印刷。
  *
  * 印刷は非表示 iframe 経由で行い、別ウィンドウを開かず印刷ダイアログのみ出す。
  *
@@ -24,21 +32,46 @@ export default defineContentScript({
     const INCLUDE_CONTACT = true; // §6 要確認⑤
     const STAFF_NAMES: Record<number, string> = {}; // §5 要確認②
 
-    /** scheduleId → 捕捉メッセージ。開いた予約を覚えておき一括/再印刷を可能に。 */
+    /** scheduleId → 捕捉メッセージ（詳細データ）。 */
     const cache = new Map<string, ScheduleCapturedMessage>();
+    /** 一覧APIで把握した全予約ID（詳細未取得でも入る）。 */
+    const knownIds = new Set<string>();
     let latestId: string | null = null;
 
     const mapOpts = { staffNames: STAFF_NAMES };
+
+    /** 「全て印刷」で再取得中の状態。null=非実行。 */
+    let pendingFetch: { wanted: string[] } | null = null;
 
     /* ───────── 捕捉データ受信 ───────── */
     window.addEventListener('message', (event) => {
       if (event.source !== window) return; // 同一ウィンドウのみ
       if (event.origin !== window.location.origin) return;
       const data = event.data;
-      if (!isScheduleCapturedMessage(data)) return;
-      cache.set(data.scheduleId, data);
-      latestId = data.scheduleId;
-      updateButtons();
+
+      if (isScheduleCapturedMessage(data)) {
+        cache.set(data.scheduleId, data);
+        knownIds.add(data.scheduleId);
+        latestId = data.scheduleId;
+        if (pendingFetch) updateFetchProgress();
+        updateButtons();
+        return;
+      }
+      if (isScheduleListMessage(data)) {
+        let added = false;
+        for (const id of data.ids) {
+          if (!knownIds.has(id)) {
+            knownIds.add(id);
+            added = true;
+          }
+        }
+        if (added) updateButtons();
+        return;
+      }
+      if (isFetchDoneMessage(data)) {
+        finishPrintAll(data.errors, data.reason);
+        return;
+      }
     });
 
     /* ───────── 印刷対象（単票）の決定 ─────────
@@ -138,6 +171,99 @@ export default defineContentScript({
       if (kartes.length === 0) return;
       if (!confirmCanceled(kartes)) return;
       printHtml(renderKartes(kartes, { includeContact: INCLUDE_CONTACT }));
+    }
+
+    /* ───────── 「全て印刷」: 一覧の全予約を対象に ─────────
+     * 一覧で把握した全ID＋開いた予約をまとめて対象とし、未取得分は MAIN に
+     * 再取得を依頼。揃ったら全件チェック済みの選択ダイアログを開く。 */
+    function allTargetIds(): string[] {
+      return Array.from(new Set<string>([...knownIds, ...cache.keys()]));
+    }
+
+    function startPrintAll(): void {
+      if (pendingFetch) return; // 取得中は無視
+      const ids = allTargetIds();
+      if (ids.length === 0) {
+        alert(
+          '印刷対象の予約が見つかりません。\n予約一覧（その日の予約など）を表示してから「全て印刷」を押してください。',
+        );
+        return;
+      }
+      const missing = ids.filter((id) => !cache.has(id));
+      if (missing.length === 0) {
+        openBatchDialog();
+        return;
+      }
+      pendingFetch = { wanted: missing };
+      showFetchProgress();
+      const req: FetchRequestMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'fetch-request',
+        ids: missing,
+      };
+      window.postMessage(req, window.location.origin);
+      // 念のためのタイムアウト（MAINから fetch-done が来ない場合）
+      window.setTimeout(() => {
+        if (pendingFetch) finishPrintAll(0);
+      }, 60_000);
+    }
+
+    function finishPrintAll(errors: number, reason?: 'no-token'): void {
+      if (!pendingFetch) return;
+      pendingFetch = null;
+      hideFetchProgress();
+      if (reason === 'no-token') {
+        alert(
+          '予約データの再取得に必要な認証情報を取得できませんでした。\n一度どれか予約を開く／一覧を再読み込みしてから、もう一度お試しください。',
+        );
+      } else if (errors > 0) {
+        // 一部失敗してもキャッシュ済みの分で続行
+        console.warn(`[cheriee-karte] 再取得に ${errors} 件失敗しました`);
+      }
+      openBatchDialog();
+    }
+
+    /* 取得中の進捗オーバーレイ */
+    function showFetchProgress(): void {
+      document.getElementById(`${PREFIX}-progress`)?.remove();
+      const overlay = document.createElement('div');
+      overlay.id = `${PREFIX}-progress`;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: '0',
+        background: 'rgba(0,0,0,.4)',
+        zIndex: '2147483647',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      } satisfies Partial<CSSStyleDeclaration>);
+      const box = document.createElement('div');
+      box.id = `${PREFIX}-progress-box`;
+      Object.assign(box.style, {
+        background: '#fff',
+        padding: '20px 28px',
+        borderRadius: '10px',
+        boxShadow: '0 8px 30px rgba(0,0,0,.35)',
+        fontFamily:
+          '"Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo",sans-serif',
+        fontSize: '14px',
+        color: '#111',
+      } satisfies Partial<CSSStyleDeclaration>);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      updateFetchProgress();
+    }
+
+    function updateFetchProgress(): void {
+      const box = document.getElementById(`${PREFIX}-progress-box`);
+      if (!box || !pendingFetch) return;
+      const total = pendingFetch.wanted.length;
+      const done = pendingFetch.wanted.filter((id) => cache.has(id)).length;
+      box.textContent = `予約データを取得中… ${done} / ${total}`;
+    }
+
+    function hideFetchProgress(): void {
+      document.getElementById(`${PREFIX}-progress`)?.remove();
     }
 
     /* ───────── 一括印刷の選択ダイアログ ───────── */
@@ -338,10 +464,10 @@ export default defineContentScript({
       const batchBtn = document.createElement('button');
       batchBtn.id = `${PREFIX}-batch`;
       batchBtn.type = 'button';
-      batchBtn.textContent = '🖨 一括印刷';
-      batchBtn.title = '開いた予約からまとめて印刷します';
+      batchBtn.textContent = '🖨 全て印刷';
+      batchBtn.title = '一覧の全予約をまとめて印刷します（未取得分は自動取得）';
       style(batchBtn, false);
-      batchBtn.addEventListener('click', openBatchDialog);
+      batchBtn.addEventListener('click', startPrintAll);
 
       const singleBtn = document.createElement('button');
       singleBtn.id = `${PREFIX}-single`;
@@ -370,11 +496,11 @@ export default defineContentScript({
         `${PREFIX}-batch`,
       ) as HTMLButtonElement | null;
       if (batch) {
-        batch.textContent =
-          cache.size > 0 ? `🖨 一括印刷 (${cache.size})` : '🖨 一括印刷';
-        batch.disabled = cache.size === 0;
-        batch.style.opacity = cache.size === 0 ? '0.5' : '1';
-        batch.style.cursor = cache.size === 0 ? 'not-allowed' : 'pointer';
+        const n = allTargetIds().length;
+        batch.textContent = n > 0 ? `🖨 全て印刷 (${n})` : '🖨 全て印刷';
+        batch.disabled = n === 0;
+        batch.style.opacity = n === 0 ? '0.5' : '1';
+        batch.style.cursor = n === 0 ? 'not-allowed' : 'pointer';
       }
     }
 
