@@ -27,8 +27,10 @@ export default defineContentScript({
     const ORIGIN = window.location.origin;
     // /v2/companies/{companyId}/schedules/{数値id}
     const SCHEDULE_RE = /\/v2\/companies\/([^/]+)\/schedules\/(\d+)(?:[/?#]|$)/;
-    // /v2/companies/{companyId}/schedules（末尾やクエリのみ。/{id} は含まない）
-    const LIST_RE = /\/v2\/companies\/([^/]+)\/schedules(?:[/?#]|$)/;
+    // 一覧は「予約の検索」結果のみ採用する。
+    // 汎用 /schedules（カレンダー/日次ビュー等の全カテゴリ一覧）を拾うと、
+    // 画面の絞り込み結果と件数がズレるため /schedules/search に限定。
+    const LIST_RE = /\/v2\/companies\/([^/]+)\/schedules\/search(?:[/?#]|$)/;
 
     // 再取得に使うため、直近に見た会社IDとトークンを保持（メモリのみ）。
     let lastCompanyId: string | undefined;
