@@ -514,28 +514,94 @@ export default defineContentScript({
       }
     }
 
-    /* ───────── ツールバー注入（ベストエフォート・要確認①） ───────── */
-    function tryInjectToolbar(): void {
-      if (document.getElementById(`${PREFIX}-tb`)) return;
-      const candidates = Array.from(
-        document.querySelectorAll<HTMLElement>('button, a, [role="button"]'),
-      );
-      const editBtn = candidates.find((el) => el.textContent?.trim() === '編集');
-      if (!editBtn || !editBtn.parentElement) return;
+    /* ───────── ツールバー注入（ネイティブ風） ─────────
+     * cheriee のページ見出しツールバー（新規予約／ダウンロード／編集 等の行）に、
+     * 同じマークアップ・クラスの「印刷」ボタンを並べる。
+     *   - 一覧/検索ツールバー（新規予約・ダウンロード） → 「全て印刷」
+     *   - 詳細ツールバー（編集 等）                     → 「印刷」（単票）
+     * FontAwesome は cheriee が読み込み済みのため fa-regular fa-print を使用。 */
+    const TB_MARK = `${PREFIX}-tb`;
 
-      const tb = document.createElement('button');
-      tb.id = `${PREFIX}-tb`;
-      tb.type = 'button';
-      tb.textContent = '🖨 印刷';
-      tb.title = 'この予約をご予約カルテ形式で印刷します';
-      Object.assign(tb.style, {
-        marginLeft: '8px',
-        padding: '4px 10px',
-        fontSize: '13px',
-        cursor: 'pointer',
-      } satisfies Partial<CSSStyleDeclaration>);
-      tb.addEventListener('click', printSingle);
-      editBtn.parentElement.appendChild(tb);
+    function makeNativeButton(
+      label: string,
+      faIcon: string,
+      onClick: () => void,
+    ): HTMLElement {
+      const wrap = document.createElement('app-action-button');
+      wrap.className = `ng-star-inserted ${TB_MARK}`;
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      // ネイティブ（新規予約/ダウンロード）と同一クラス
+      btn.className =
+        'mat-mdc-tooltip-trigger flex flex-row items-center justify-center ' +
+        'gap-1 font-medium duration-300 whitespace-nowrap outline-0 ' +
+        'bg-transparent border border-transparent hover:bg-gray-900 ' +
+        'hover:bg-opacity-5 min-w-20 px-1 py-2 rounded sm:min-w-24 ' +
+        'text-gray-900 text-sm tracking-tight';
+
+      const icon = document.createElement('app-icon');
+      icon.setAttribute('type', 'regular');
+      icon.className = 'hidden sm:inline-block';
+      const i = document.createElement('i');
+      i.className = `inline-block fa-regular ${faIcon}`;
+      i.setAttribute('aria-hidden', 'true');
+      icon.appendChild(i);
+
+      btn.append(icon, document.createTextNode(label));
+      btn.addEventListener('click', onClick);
+      wrap.appendChild(btn);
+      return wrap;
+    }
+
+    /** 指定ラベルのネイティブボタンを含む action-button 行（親）を探す */
+    function findActionRow(labels: string[]): HTMLElement | null {
+      const btns = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('app-action-button button'),
+      );
+      for (const b of btns) {
+        const t = b.textContent?.trim();
+        if (t && labels.includes(t)) {
+          const wrap = b.closest('app-action-button');
+          if (wrap?.parentElement) return wrap.parentElement;
+        }
+      }
+      return null;
+    }
+
+    /** ツールバーへ注入できたら true（フローティング非表示の判断に使う） */
+    function tryInjectToolbar(): boolean {
+      let injected = false;
+
+      // 一覧/検索ツールバー → 全て印刷
+      const listRow = findActionRow(['新規予約', 'ダウンロード']);
+      if (listRow) {
+        if (!listRow.querySelector(`.${TB_MARK}-all`)) {
+          const el = makeNativeButton('全て印刷', 'fa-print', startPrintAll);
+          el.classList.add(`${TB_MARK}-all`);
+          listRow.appendChild(el);
+        }
+        injected = true;
+      }
+
+      // 詳細ツールバー → 単票印刷
+      const detailRow = findActionRow(['編集', '会計', '記録']);
+      if (detailRow && detailRow !== listRow) {
+        if (!detailRow.querySelector(`.${TB_MARK}-one`)) {
+          const el = makeNativeButton('印刷', 'fa-print', printSingle);
+          el.classList.add(`${TB_MARK}-one`);
+          detailRow.appendChild(el);
+        }
+        injected = true;
+      }
+
+      return injected;
+    }
+
+    /** ツールバー注入できた場合はフローティングを隠す（重複回避） */
+    function syncFloatingVisibility(toolbarInjected: boolean): void {
+      const fab = document.getElementById(`${PREFIX}-fab`);
+      if (fab) fab.style.display = toolbarInjected ? 'none' : 'flex';
     }
 
     /* ───────── 起動 ─────────
@@ -562,13 +628,14 @@ export default defineContentScript({
       requestAnimationFrame(() => {
         syncScheduled = false;
         ensureButtons();
-        tryInjectToolbar();
+        const injected = tryInjectToolbar();
         updateButtons();
+        syncFloatingVisibility(injected);
       });
     }
 
     ensureButtons();
-    tryInjectToolbar();
+    syncFloatingVisibility(tryInjectToolbar());
 
     const observer = new MutationObserver((records) => {
       // すべて自分のUI内の変化なら無視（自己ループ防止）
