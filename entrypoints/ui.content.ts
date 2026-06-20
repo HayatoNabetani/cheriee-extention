@@ -561,9 +561,17 @@ export default defineContentScript({
       return wrap;
     }
 
-    /** いま詳細ページか（URLに数値scheduleId）。それ以外は一覧扱い。 */
-    function isDetailContext(): boolean {
-      return /\/schedules\/\d+(?:[/?#]|$)/.test(window.location.pathname);
+    /**
+     * 現在ページの種別。
+     *  - 'search': /schedules/search → 「全て印刷」を出す
+     *  - 'detail': /schedules/{数値id} → 「印刷」(単票)を出す
+     *  - 'other' : それ以外 → ボタンを出さない
+     */
+    function pageMode(): 'search' | 'detail' | 'other' {
+      const p = window.location.pathname;
+      if (/\/schedules\/search(?:[/?#]|$)/.test(p)) return 'search';
+      if (/\/schedules\/\d+(?:[/?#]|$)/.test(p)) return 'detail';
+      return 'other';
     }
 
     /**
@@ -591,36 +599,65 @@ export default defineContentScript({
       return null;
     }
 
-    /** ツールバーへ注入できたら true（フローティング非表示の判断に使う） */
-    function tryInjectToolbar(): boolean {
-      const row = findHeadingRow();
-      if (!row) return false;
-
-      const ctx = isDetailContext() ? 'detail' : 'list';
-      const existing = row.querySelector<HTMLElement>(`.${TB_MARK}`);
-      // 文脈が変わったら作り直す（一覧↔詳細でラベル/動作が変わる）
-      if (existing && existing.dataset.ctx !== ctx) existing.remove();
-
-      if (!row.querySelector(`.${TB_MARK}`)) {
-        const el =
-          ctx === 'detail'
-            ? makeNativeButton('印刷', 'fa-print', printSingle)
-            : makeNativeButton('全て印刷', 'fa-print', startPrintAll);
-        el.dataset.ctx = ctx;
-        row.appendChild(el);
-        if (!toolbarLogged) {
-          console.info('[cheriee-karte] ツールバーに印刷ボタンを注入しました', ctx);
-          toolbarLogged = true;
-        }
-      }
-      return true;
+    /** ツールバーへ注入した種別（フローティング表示判断に使う） */
+    interface ToolbarState {
+      all: boolean;
+      single: boolean;
     }
-    let toolbarLogged = false;
 
-    /** ツールバー注入できた場合はフローティングを隠す（重複回避） */
-    function syncFloatingVisibility(toolbarInjected: boolean): void {
+    function tryInjectToolbar(): ToolbarState {
+      const mode = pageMode();
+      // 出すべきボタンの種別（search→all / detail→single / other→なし）
+      const wantCtx: 'all' | 'single' | null =
+        mode === 'search' ? 'all' : mode === 'detail' ? 'single' : null;
+
+      const row = findHeadingRow();
+      if (!row) return { all: false, single: false };
+
+      const existing = row.querySelector<HTMLElement>(`.${TB_MARK}`);
+      // 種別が変わった/不要になったら撤去（SPA遷移でページ種別が変わるため）
+      if (existing && existing.dataset.ctx !== wantCtx) existing.remove();
+
+      if (wantCtx && !row.querySelector(`.${TB_MARK}`)) {
+        const el =
+          wantCtx === 'all'
+            ? makeNativeButton('全て印刷', 'fa-print', startPrintAll)
+            : makeNativeButton('印刷', 'fa-print', printSingle);
+        el.dataset.ctx = wantCtx;
+        row.appendChild(el);
+        console.info('[cheriee-karte] ツールバーに印刷ボタンを注入しました', wantCtx);
+      }
+
+      const cur = row.querySelector<HTMLElement>(`.${TB_MARK}`);
+      return {
+        all: cur?.dataset.ctx === 'all',
+        single: cur?.dataset.ctx === 'single',
+      };
+    }
+
+    /**
+     * フローティングはフォールバック。ページ種別に合うボタンだけ、かつ
+     * ツールバーに出せなかった時のみ表示する（全て印刷は search のみ）。
+     */
+    function syncFloating(injected: ToolbarState): void {
+      const mode = pageMode();
+      const batch = document.getElementById(`${PREFIX}-batch`);
+      const single = document.getElementById(`${PREFIX}-single`);
+      if (batch) {
+        batch.style.display =
+          mode === 'search' && !injected.all ? '' : 'none';
+      }
+      if (single) {
+        single.style.display =
+          mode === 'detail' && !injected.single ? '' : 'none';
+      }
       const fab = document.getElementById(`${PREFIX}-fab`);
-      if (fab) fab.style.display = toolbarInjected ? 'none' : 'flex';
+      if (fab) {
+        const anyVisible =
+          (batch && batch.style.display !== 'none') ||
+          (single && single.style.display !== 'none');
+        fab.style.display = anyVisible ? 'flex' : 'none';
+      }
     }
 
     /* ───────── 起動 ─────────
@@ -649,12 +686,12 @@ export default defineContentScript({
         ensureButtons();
         const injected = tryInjectToolbar();
         updateButtons();
-        syncFloatingVisibility(injected);
+        syncFloating(injected);
       });
     }
 
     ensureButtons();
-    syncFloatingVisibility(tryInjectToolbar());
+    syncFloating(tryInjectToolbar());
 
     const observer = new MutationObserver((records) => {
       // すべて自分のUI内の変化なら無視（自己ループ防止）
