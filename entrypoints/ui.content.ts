@@ -40,8 +40,8 @@ export default defineContentScript({
 
     const mapOpts = { staffNames: STAFF_NAMES };
 
-    /** 「全て印刷」で再取得中の状態。null=非実行。 */
-    let pendingFetch: { wanted: string[] } | null = null;
+    /** 「全て印刷」で再取得中の状態。null=非実行。received=今回取り直して届いたID。 */
+    let pendingFetch: { wanted: string[]; received: Set<string> } | null = null;
 
     /* ───────── 捕捉データ受信 ───────── */
     window.addEventListener('message', (event) => {
@@ -50,10 +50,13 @@ export default defineContentScript({
       const data = event.data;
 
       if (isScheduleCapturedMessage(data)) {
-        cache.set(data.scheduleId, data);
+        cache.set(data.scheduleId, data); // 最新で上書き（変更が反映される）
         knownIds.add(data.scheduleId);
         latestId = data.scheduleId;
-        if (pendingFetch) updateFetchProgress();
+        if (pendingFetch && pendingFetch.wanted.includes(data.scheduleId)) {
+          pendingFetch.received.add(data.scheduleId);
+          updateFetchProgress();
+        }
         updateButtons();
         return;
       }
@@ -189,35 +192,42 @@ export default defineContentScript({
         );
         return;
       }
-      const missing = ids.filter((id) => !cache.has(id));
-      if (missing.length === 0) {
-        openBatchDialog();
-        return;
-      }
-      pendingFetch = { wanted: missing };
+      // カテゴリ・時間・備考などの変更を反映するため、対象を全件 最新に取り直す。
+      // （取得できなかった分は、既にキャッシュ済みの内容があればそれで代替する）
+      pendingFetch = { wanted: ids, received: new Set() };
       showFetchProgress();
       const req: FetchRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
         type: 'fetch-request',
-        ids: missing,
+        ids,
       };
       window.postMessage(req, window.location.origin);
-      // 念のためのタイムアウト（MAINから fetch-done が来ない場合）
-      window.setTimeout(() => {
-        if (pendingFetch) finishPrintAll(0);
-      }, 60_000);
+      // 念のためのタイムアウト（MAINから fetch-done が来ない場合）。件数に応じて延長。
+      window.setTimeout(
+        () => {
+          if (pendingFetch) finishPrintAll(0);
+        },
+        Math.max(60_000, ids.length * 1_500),
+      );
     }
 
     function finishPrintAll(errors: number, reason?: 'no-token'): void {
       if (!pendingFetch) return;
+      const total = pendingFetch.wanted.length;
+      const got = pendingFetch.received.size;
       pendingFetch = null;
       hideFetchProgress();
       if (reason === 'no-token') {
         alert(
           '予約データの再取得に必要な認証情報を取得できませんでした。\n一度どれか予約を開く／一覧を再読み込みしてから、もう一度お試しください。',
         );
+      } else if (got === 0 && errors > 0) {
+        // 全件取得失敗（トークン期限切れ等の可能性）。キャッシュがあればそれで続行。
+        alert(
+          '最新データの取得に失敗しました（認証の期限切れの可能性）。\n一覧を再読み込みしてから、もう一度お試しください。\n（取得済みのデータがあればそのまま表示します）',
+        );
       } else if (errors > 0) {
-        // 一部失敗してもキャッシュ済みの分で続行
+        // 一部のみ失敗。届いた分は最新、残りはキャッシュ（あれば）で続行。
         console.warn(`[cheriee-karte] 再取得に ${errors} 件失敗しました`);
       }
       openBatchDialog();
@@ -258,8 +268,8 @@ export default defineContentScript({
       const box = document.getElementById(`${PREFIX}-progress-box`);
       if (!box || !pendingFetch) return;
       const total = pendingFetch.wanted.length;
-      const done = pendingFetch.wanted.filter((id) => cache.has(id)).length;
-      box.textContent = `予約データを取得中… ${done} / ${total}`;
+      const done = pendingFetch.received.size;
+      box.textContent = `予約データを最新に取得中… ${done} / ${total}`;
     }
 
     function hideFetchProgress(): void {
