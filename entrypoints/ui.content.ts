@@ -32,10 +32,16 @@ export default defineContentScript({
     const INCLUDE_CONTACT = true; // §6 要確認⑤
     const STAFF_NAMES: Record<number, string> = {}; // §5 要確認②
 
+    // 読み込み確認用（実機での切り分け）。problemなら DevTools コンソールに出る。
+    console.info('[cheriee-karte] content script loaded');
+
     /** scheduleId → 捕捉メッセージ（詳細データ）。 */
     const cache = new Map<string, ScheduleCapturedMessage>();
-    /** 一覧APIで把握した全予約ID（詳細未取得でも入る）。 */
-    const knownIds = new Set<string>();
+    /**
+     * 「今表示している一覧」の予約ID。一覧APIを横取りするたびに置き換える
+     * （accumulate しない）。これにより「全て印刷」の件数が現在の検索結果と一致する。
+     */
+    let listIds: string[] = [];
     let latestId: string | null = null;
 
     const mapOpts = { staffNames: STAFF_NAMES };
@@ -51,7 +57,6 @@ export default defineContentScript({
 
       if (isScheduleCapturedMessage(data)) {
         cache.set(data.scheduleId, data); // 最新で上書き（変更が反映される）
-        knownIds.add(data.scheduleId);
         latestId = data.scheduleId;
         if (pendingFetch && pendingFetch.wanted.includes(data.scheduleId)) {
           pendingFetch.received.add(data.scheduleId);
@@ -61,14 +66,9 @@ export default defineContentScript({
         return;
       }
       if (isScheduleListMessage(data)) {
-        let added = false;
-        for (const id of data.ids) {
-          if (!knownIds.has(id)) {
-            knownIds.add(id);
-            added = true;
-          }
-        }
-        if (added) updateButtons();
+        // 現在表示中の一覧で置き換える（古い検索結果を引きずらない）
+        listIds = data.ids.slice();
+        updateButtons();
         return;
       }
       if (isFetchDoneMessage(data)) {
@@ -180,7 +180,9 @@ export default defineContentScript({
      * 一覧で把握した全ID＋開いた予約をまとめて対象とし、未取得分は MAIN に
      * 再取得を依頼。揃ったら全件チェック済みの選択ダイアログを開く。 */
     function allTargetIds(): string[] {
-      return Array.from(new Set<string>([...knownIds, ...cache.keys()]));
+      // 一覧を捕捉していればそれ（＝現在の検索結果）を対象に。
+      // まだ一覧が無ければ、開いた予約（キャッシュ）を対象にフォールバック。
+      return listIds.length > 0 ? listIds.slice() : Array.from(cache.keys());
     }
 
     function startPrintAll(): void {
@@ -554,11 +556,26 @@ export default defineContentScript({
       return wrap;
     }
 
-    /** 指定ラベルのネイティブボタンを含む action-button 行（親）を探す */
-    function findActionRow(labels: string[]): HTMLElement | null {
+    /** いま詳細ページか（URLに数値scheduleId）。それ以外は一覧扱い。 */
+    function isDetailContext(): boolean {
+      return /\/schedules\/\d+(?:[/?#]|$)/.test(window.location.pathname);
+    }
+
+    /**
+     * 見出しツールバー行（新規予約／ダウンロード／編集 等が並ぶ div）を探す。
+     * テキストに依存せず、app-page-heading 内の app-action-button の親を使う。
+     * 見つからなければラベル一致でフォールバック。
+     */
+    function findHeadingRow(): HTMLElement | null {
+      const heading = document.querySelector('app-page-heading');
+      const anchor = heading?.querySelector('app-action-button');
+      if (anchor?.parentElement) return anchor.parentElement;
+
+      // フォールバック: 既知ラベルを持つ action-button の親
       const btns = Array.from(
         document.querySelectorAll<HTMLButtonElement>('app-action-button button'),
       );
+      const labels = ['新規予約', 'ダウンロード', '編集', '会計', '記録'];
       for (const b of btns) {
         const t = b.textContent?.trim();
         if (t && labels.includes(t)) {
@@ -571,32 +588,29 @@ export default defineContentScript({
 
     /** ツールバーへ注入できたら true（フローティング非表示の判断に使う） */
     function tryInjectToolbar(): boolean {
-      let injected = false;
+      const row = findHeadingRow();
+      if (!row) return false;
 
-      // 一覧/検索ツールバー → 全て印刷
-      const listRow = findActionRow(['新規予約', 'ダウンロード']);
-      if (listRow) {
-        if (!listRow.querySelector(`.${TB_MARK}-all`)) {
-          const el = makeNativeButton('全て印刷', 'fa-print', startPrintAll);
-          el.classList.add(`${TB_MARK}-all`);
-          listRow.appendChild(el);
+      const ctx = isDetailContext() ? 'detail' : 'list';
+      const existing = row.querySelector<HTMLElement>(`.${TB_MARK}`);
+      // 文脈が変わったら作り直す（一覧↔詳細でラベル/動作が変わる）
+      if (existing && existing.dataset.ctx !== ctx) existing.remove();
+
+      if (!row.querySelector(`.${TB_MARK}`)) {
+        const el =
+          ctx === 'detail'
+            ? makeNativeButton('印刷', 'fa-print', printSingle)
+            : makeNativeButton('全て印刷', 'fa-print', startPrintAll);
+        el.dataset.ctx = ctx;
+        row.appendChild(el);
+        if (!toolbarLogged) {
+          console.info('[cheriee-karte] ツールバーに印刷ボタンを注入しました', ctx);
+          toolbarLogged = true;
         }
-        injected = true;
       }
-
-      // 詳細ツールバー → 単票印刷
-      const detailRow = findActionRow(['編集', '会計', '記録']);
-      if (detailRow && detailRow !== listRow) {
-        if (!detailRow.querySelector(`.${TB_MARK}-one`)) {
-          const el = makeNativeButton('印刷', 'fa-print', printSingle);
-          el.classList.add(`${TB_MARK}-one`);
-          detailRow.appendChild(el);
-        }
-        injected = true;
-      }
-
-      return injected;
+      return true;
     }
+    let toolbarLogged = false;
 
     /** ツールバー注入できた場合はフローティングを隠す（重複回避） */
     function syncFloatingVisibility(toolbarInjected: boolean): void {
