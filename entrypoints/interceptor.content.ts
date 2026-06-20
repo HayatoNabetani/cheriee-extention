@@ -126,7 +126,12 @@ export default defineContentScript({
       if (listCompany) {
         rememberCreds(listCompany, undefined);
         try {
-          emitList(extractListIds(parse()));
+          const ids = extractListIds(parse());
+          // 切り分け用ログ: どのURLが何件返しているか（5件 vs 12件 の特定に使う）
+          console.info(
+            `[cheriee-karte] list captured (${ids.length}件): ${url}`,
+          );
+          emitList(ids);
         } catch {
           /* 一覧でない/解析失敗は無視 */
         }
