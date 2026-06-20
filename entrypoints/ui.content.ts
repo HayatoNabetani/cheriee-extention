@@ -215,7 +215,7 @@ export default defineContentScript({
 
     function finishPrintAll(errors: number, reason?: 'no-token'): void {
       if (!pendingFetch) return;
-      const total = pendingFetch.wanted.length;
+      const targetIds = pendingFetch.wanted.slice(); // 今回取得した対象に限定
       const got = pendingFetch.received.size;
       pendingFetch = null;
       hideFetchProgress();
@@ -232,7 +232,7 @@ export default defineContentScript({
         // 一部のみ失敗。届いた分は最新、残りはキャッシュ（あれば）で続行。
         console.warn(`[cheriee-karte] 再取得に ${errors} 件失敗しました`);
       }
-      openBatchDialog();
+      openBatchDialog(targetIds);
     }
 
     /* 取得中の進捗オーバーレイ */
@@ -278,11 +278,15 @@ export default defineContentScript({
       document.getElementById(`${PREFIX}-progress`)?.remove();
     }
 
-    /* ───────── 一括印刷の選択ダイアログ ───────── */
-    function openBatchDialog(): void {
-      if (cache.size === 0) {
+    /* ───────── 一括印刷の選択ダイアログ ─────────
+     * 対象は「今回の検索結果」(targetIds)に限定する。cache 全体ではないので、
+     * 検索を切り替えても前回ぶんが混ざらない。 */
+    function openBatchDialog(targetIds: string[] = allTargetIds()): void {
+      // 今回の対象のうち、データが取得できているものだけ表示
+      const ids = targetIds.filter((id) => cache.has(id));
+      if (ids.length === 0) {
         alert(
-          'まだ印刷できる予約がありません。\n予約をいくつか開いてから一括印刷してください。',
+          '印刷できる予約データがありません。\n一覧を再読み込みしてから、もう一度お試しください。',
         );
         return;
       }
@@ -332,14 +336,15 @@ export default defineContentScript({
       } satisfies Partial<CSSStyleDeclaration>);
 
       const checkboxes: HTMLInputElement[] = [];
-      // 期間でソートして並べる（取得順だと分かりにくいため）
-      const entries = Array.from(cache.entries()).map(([id, captured]) => ({
-        id,
-        karte: mapResponseToKarte(captured.data, mapOpts),
-      }));
-      entries.sort((a, b) =>
-        (a.karte.period || '').localeCompare(b.karte.period || ''),
-      );
+      // 今回の対象IDのみ（cache 全体ではない）。期間でソートして並べる。
+      const entries = ids
+        .map((id) => {
+          const captured = cache.get(id)!;
+          return { id, karte: mapResponseToKarte(captured.data, mapOpts) };
+        })
+        .sort((a, b) =>
+          (a.karte.period || '').localeCompare(b.karte.period || ''),
+        );
 
       for (const { id, karte } of entries) {
         const row = document.createElement('label');
