@@ -48,6 +48,13 @@ export default defineContentScript({
       if (auth) lastAuth = auth;
     }
 
+    /** どの api.cheriee.jp リクエストからでも会社IDを拾う（/tenants 等含む） */
+    function rememberCompanyFromUrl(url: string | undefined): void {
+      if (!url) return;
+      const m = /\/v2\/companies\/([^/]+)\//.exec(url);
+      if (m && m[1]) lastCompanyId = m[1];
+    }
+
     /** 検索リクエストのボディ（POST JSON）を控える。tenantId も収集。 */
     function postRangeCaptured(): void {
       window.postMessage(
@@ -269,6 +276,7 @@ export default defineContentScript({
 
       const promise = origFetch.apply(this, args);
 
+      rememberCompanyFromUrl(url); // どのapi呼び出しからでも会社IDを拾う
       const inspect =
         !!detailMatch(url) || !!listMatch(url) || /tenant/i.test(url);
       if (listMatch(url) && typeof init?.body === 'string') {
@@ -317,6 +325,7 @@ export default defineContentScript({
       ...rest: unknown[]
     ) {
       this.__cheriee_url = typeof url === 'string' ? url : url.href;
+      rememberCompanyFromUrl(this.__cheriee_url); // 会社IDを拾う
       // @ts-expect-error 可変長を原関数へ素通し
       return origOpen.call(this, method, url, ...rest);
     };
@@ -509,6 +518,22 @@ export default defineContentScript({
       return `${md(sm!, sday!)}〜${md(em!, eday!)}`;
     }
 
+    /** 表示中の選択期間を取得。検索/カレンダーともブラウザURLの start/end を最優先。 */
+    function selectedRange(): { start: string; end: string } | null {
+      try {
+        const u = new URL(window.location.href);
+        const start = u.searchParams.get('start');
+        const end = u.searchParams.get('end');
+        if (start && end) return { start, end };
+      } catch {
+        /* noop */
+      }
+      const s = lastSearchBody?.start;
+      const e = lastSearchBody?.end;
+      if (typeof s === 'string' && typeof e === 'string') return { start: s, end: e };
+      return null;
+    }
+
     async function computeCounts(): Promise<void> {
       const companyId = lastCompanyId;
       const token = lastAuth;
@@ -521,19 +546,17 @@ export default defineContentScript({
         { label: '本日', results: await queryCounts(companyId, token, today.start, today.end) },
       ];
 
-      // 検索で選択中の期間が「本日」と異なれば、その期間も追加
-      const selStart = lastSearchBody?.start;
-      const selEnd = lastSearchBody?.end;
-      if (typeof selStart === 'string' && typeof selEnd === 'string') {
-        const isToday =
-          isoDate(selStart) === isoDate(today.start) &&
-          isoDate(selEnd) === isoDate(today.end);
-        if (!isToday) {
-          groups.push({
-            label: rangeLabel(selStart, selEnd),
-            results: await queryCounts(companyId, token, selStart, selEnd),
-          });
-        }
+      // 選択中の期間が「本日」と異なれば、その期間も追加
+      const sel = selectedRange();
+      if (
+        sel &&
+        !(isoDate(sel.start) === isoDate(today.start) &&
+          isoDate(sel.end) === isoDate(today.end))
+      ) {
+        groups.push({
+          label: rangeLabel(sel.start, sel.end),
+          results: await queryCounts(companyId, token, sel.start, sel.end),
+        });
       }
       console.info('[cheriee-karte] 店舗別件数', groups);
       postCounts(groups);

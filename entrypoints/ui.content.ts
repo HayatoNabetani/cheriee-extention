@@ -53,6 +53,8 @@ export default defineContentScript({
     /** 店舗別件数グループ（本日／選択日）。null=未取得。 */
     let todayCounts: CountGroup[] | null = null;
     let countsTimer: number | null = null;
+    let countsRetries = 0;
+    let lastRangeKey = '';
 
     /** MAIN に店舗別件数を依頼（バースト/連続発火をデバウンスして最新の期間で1回） */
     function requestTodayCounts(): void {
@@ -65,6 +67,20 @@ export default defineContentScript({
         };
         window.postMessage(req, window.location.origin);
       }, 300);
+    }
+
+    /** 検索/カレンダーで URL(期間)が変わったら件数を取り直す */
+    function maybeRequestCounts(): void {
+      const mode = pageMode();
+      if (mode !== 'search' && mode !== 'calendar') {
+        lastRangeKey = '';
+        return;
+      }
+      const key = window.location.pathname + window.location.search;
+      if (key === lastRangeKey) return;
+      lastRangeKey = key;
+      countsRetries = 0;
+      requestTodayCounts();
     }
 
     /* ───────── 捕捉データ受信 ───────── */
@@ -97,6 +113,15 @@ export default defineContentScript({
         return;
       }
       if (isTodayCountsMessage(data)) {
+        if (data.reason === 'no-token') {
+          // トークン/会社ID がまだ揃っていない → 少し待って再試行
+          if (countsRetries < 5) {
+            countsRetries++;
+            window.setTimeout(requestTodayCounts, 1200);
+          }
+          return;
+        }
+        countsRetries = 0;
         todayCounts = data.groups;
         renderTodayCounts();
         return;
@@ -647,11 +672,14 @@ export default defineContentScript({
       const heading = document.querySelector('app-page-heading');
       if (!heading) return;
 
-      // 検索ページは「○件ヒットしました」の行にインライン、それ以外は見出し直下にブロック
+      // 字幕（検索:「○件ヒット」/ カレンダー:「○件の予約があります。…表示します。」）の
+      // リーフを探し、その親（字幕行）の末尾にぶら下げる＝字幕の横に出る。
       const leaf = Array.from(heading.querySelectorAll<HTMLElement>('div')).find(
         (d) =>
           d.children.length === 0 &&
-          /ヒットしました|件の予約/.test(d.textContent ?? ''),
+          /ヒットしました|件の予約|カレンダーに表示|表示します/.test(
+            d.textContent ?? '',
+          ),
       );
       const inline = !!leaf?.parentElement;
       const container = leaf?.parentElement ?? heading;
@@ -800,6 +828,7 @@ export default defineContentScript({
         const injected = tryInjectToolbar();
         updateButtons();
         syncFloating(injected);
+        maybeRequestCounts(); // URL(期間)が変わっていれば件数を取り直す
         renderTodayCounts();
       });
     }
