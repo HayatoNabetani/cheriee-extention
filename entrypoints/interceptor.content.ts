@@ -32,6 +32,8 @@ export default defineContentScript({
     // 汎用 /schedules（カレンダー/日次ビュー等の全カテゴリ一覧）を拾うと、
     // 画面の絞り込み結果と件数がズレるため /schedules/search に限定。
     const LIST_RE = /\/v2\/companies\/([^/]+)\/schedules\/search(?:[/?#]|$)/;
+    // カレンダー（月/週/日ビュー）。期間は start/end クエリで持つ。
+    const CALENDAR_RE = /\/v2\/companies\/([^/]+)\/schedules\/calendar\//;
 
     // 再取得に使うため、直近に見た会社IDとトークンを保持（メモリのみ）。
     let lastCompanyId: string | undefined;
@@ -47,18 +49,46 @@ export default defineContentScript({
     }
 
     /** 検索リクエストのボディ（POST JSON）を控える。tenantId も収集。 */
+    function postRangeCaptured(): void {
+      window.postMessage(
+        { source: KARTE_MESSAGE_SOURCE, type: 'range-captured' },
+        ORIGIN,
+      );
+    }
+
     function captureSearchBody(rawBody: unknown): void {
       if (typeof rawBody !== 'string') return;
       try {
         const obj = JSON.parse(rawBody) as Record<string, unknown>;
         lastSearchBody = obj;
         if (typeof obj.tenantId === 'string') tenantIds.add(obj.tenantId);
-        console.info(
-          `[cheriee-karte] search req: tenant=${String(obj.tenantId)} ${String(obj.start)}..${String(obj.end)} (known tenants: ${tenantIds.size})`,
-        );
+        postRangeCaptured();
       } catch {
         /* JSONでなければ無視 */
       }
+    }
+
+    /** カレンダー(月/週/日)リクエストの URL から表示中の期間を控える */
+    function captureCalendar(url: string | undefined): boolean {
+      if (!url) return false;
+      const m = CALENDAR_RE.exec(url);
+      if (!m) return false;
+      rememberCreds(m[1], undefined);
+      try {
+        const u = new URL(url, ORIGIN);
+        const start = u.searchParams.get('start');
+        const end = u.searchParams.get('end');
+        const tenantId = u.searchParams.get('tenantId');
+        if (start && end) {
+          lastSearchBody = { start, end, ...(tenantId ? { tenantId } : {}) };
+          if (tenantId) tenantIds.add(tenantId);
+          console.info(`[cheriee-karte] calendar range: ${start}..${end}`);
+          postRangeCaptured();
+        }
+      } catch {
+        /* URLでなければ無視 */
+      }
+      return true;
     }
 
     /** 店舗一覧（URLに tenant を含む）レスポンスから tenantId を収集。 */
@@ -244,6 +274,7 @@ export default defineContentScript({
       if (listMatch(url) && typeof init?.body === 'string') {
         captureSearchBody(init.body); // 検索条件（日付等）を控える
       }
+      captureCalendar(url); // カレンダー表示中の期間を控える
       if (inspect) {
         const auth =
           authFromHeaders(init?.headers) ??
@@ -307,6 +338,7 @@ export default defineContentScript({
       if (listMatch(url) && typeof args[0] === 'string') {
         captureSearchBody(args[0]); // 検索条件（日付等）を控える
       }
+      captureCalendar(url); // カレンダー表示中の期間を控える
       const inspect =
         !!detailMatch(url) || !!listMatch(url) || (!!url && /tenant/i.test(url));
       if (inspect) {
@@ -454,22 +486,27 @@ export default defineContentScript({
     /** ISO(...+09:00) の日付部分(YYYY-MM-DD) */
     const isoDate = (s: string) => s.slice(0, 10);
 
-    /** 選択期間のラベル（例 "6/23(火)" / "6/23〜6/25"） */
+    /** 選択期間のラベル（例 "6/23(火)" / "6月" / "6/23〜6/25"） */
     function rangeLabel(start: string, end: string): string {
       const sd = isoDate(start);
       const ed = isoDate(end);
-      const md = (d: string) => {
-        const [, m, day] = d.split('-');
-        return `${Number(m)}/${Number(day)}`;
-      };
+      const [sy, sm, sday] = sd.split('-').map(Number);
+      const [ey, em, eday] = ed.split('-').map(Number);
+      const md = (m: number, d: number) => `${m}/${d}`;
+
       if (sd === ed) {
         const wd = new Intl.DateTimeFormat('ja-JP', {
           timeZone: 'Asia/Tokyo',
           weekday: 'short',
         }).format(new Date(`${sd}T12:00:00+09:00`));
-        return `${md(sd)}(${wd})`;
+        return `${md(sm!, sday!)}(${wd})`;
       }
-      return `${md(sd)}〜${md(ed)}`;
+      // 月の1日〜末日ちょうどなら「M月」表記（カレンダー月表示）
+      if (sy === ey && sm === em && sday === 1) {
+        const lastDay = new Date(Date.UTC(sy!, sm!, 0)).getUTCDate();
+        if (eday === lastDay) return `${sm}月`;
+      }
+      return `${md(sm!, sday!)}〜${md(em!, eday!)}`;
     }
 
     async function computeCounts(): Promise<void> {

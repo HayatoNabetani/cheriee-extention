@@ -171,6 +171,21 @@ export function isFetchDoneMessage(
   return m.source === KARTE_MESSAGE_SOURCE && m.type === 'fetch-done';
 }
 
+/** 表示中の期間（検索ボディ/カレンダークエリ）を捕捉した通知（MAIN → ISOLATED）。
+ * これを受けて ISOLATED 側が店舗別件数を再取得する。 */
+export interface RangeCapturedMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'range-captured';
+}
+
+export function isRangeCapturedMessage(
+  value: unknown,
+): value is RangeCapturedMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return m.source === KARTE_MESSAGE_SOURCE && m.type === 'range-captured';
+}
+
 /** 本日の店舗別予約数の取得依頼（ISOLATED → MAIN） */
 export interface TodayCountsRequestMessage {
   source: typeof KARTE_MESSAGE_SOURCE;

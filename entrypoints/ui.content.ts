@@ -2,6 +2,7 @@ import {
   isScheduleCapturedMessage,
   isScheduleListMessage,
   isTodayCountsMessage,
+  isRangeCapturedMessage,
   isFetchDoneMessage,
   type ScheduleCapturedMessage,
   type FetchRequestMessage,
@@ -51,20 +52,19 @@ export default defineContentScript({
 
     /** 店舗別件数グループ（本日／選択日）。null=未取得。 */
     let todayCounts: CountGroup[] | null = null;
-    let countsInFlight = false;
+    let countsTimer: number | null = null;
 
-    /** MAIN に本日の店舗別件数を依頼（検索ページでのみ・単発） */
+    /** MAIN に店舗別件数を依頼（バースト/連続発火をデバウンスして最新の期間で1回） */
     function requestTodayCounts(): void {
-      if (countsInFlight) return;
-      countsInFlight = true;
-      const req: TodayCountsRequestMessage = {
-        source: KARTE_MESSAGE_SOURCE,
-        type: 'today-counts-request',
-      };
-      window.postMessage(req, window.location.origin);
-      window.setTimeout(() => {
-        countsInFlight = false; // 応答が来ない場合の保険
-      }, 15_000);
+      if (countsTimer != null) clearTimeout(countsTimer);
+      countsTimer = window.setTimeout(() => {
+        countsTimer = null;
+        const req: TodayCountsRequestMessage = {
+          source: KARTE_MESSAGE_SOURCE,
+          type: 'today-counts-request',
+        };
+        window.postMessage(req, window.location.origin);
+      }, 300);
     }
 
     /* ───────── 捕捉データ受信 ───────── */
@@ -84,17 +84,19 @@ export default defineContentScript({
         return;
       }
       if (isScheduleListMessage(data)) {
-        // 現在表示中の検索結果で置き換える（古い検索を引きずらない）
+        // 現在表示中の検索結果で置き換える（古い検索を引きずらない）＝印刷の対象
         listIds = data.ids.slice();
         updateButtons();
-        // 検索ページなら本日の店舗別件数も取得して見出し横に表示
-        if (/\/schedules\/search(?:[/?#]|$)/.test(window.location.pathname)) {
+        return;
+      }
+      if (isRangeCapturedMessage(data)) {
+        // 検索/カレンダーの表示期間が変わった → 店舗別件数を取り直す
+        if (pageMode() === 'search' || pageMode() === 'calendar') {
           requestTodayCounts();
         }
         return;
       }
       if (isTodayCountsMessage(data)) {
-        countsInFlight = false;
         todayCounts = data.groups;
         renderTodayCounts();
         return;
@@ -591,13 +593,15 @@ export default defineContentScript({
 
     /**
      * 現在ページの種別。
-     *  - 'search': /schedules/search → 「全て印刷」を出す
-     *  - 'detail': /schedules/{数値id} → 「印刷」(単票)を出す
-     *  - 'other' : それ以外 → ボタンを出さない
+     *  - 'search'  : /schedules/search → 「全て印刷」＋店舗別件数
+     *  - 'calendar': /schedules/calendar/... → 店舗別件数のみ（印刷ボタンなし）
+     *  - 'detail'  : /schedules/{数値id} → 「印刷」(単票)
+     *  - 'other'   : それ以外 → 何も出さない
      */
-    function pageMode(): 'search' | 'detail' | 'other' {
+    function pageMode(): 'search' | 'calendar' | 'detail' | 'other' {
       const p = window.location.pathname;
       if (/\/schedules\/search(?:[/?#]|$)/.test(p)) return 'search';
+      if (/\/schedules\/calendar(?:[/?#]|$)/.test(p)) return 'calendar';
       if (/\/schedules\/\d+(?:[/?#]|$)/.test(p)) return 'detail';
       return 'other';
     }
@@ -628,35 +632,46 @@ export default defineContentScript({
     }
 
     /**
-     * 見出しの「○件ヒットしました」の横に、本日の店舗別＋合計の予約数を表示する。
-     * 検索ページ以外、または未取得なら撤去。
+     * 店舗別＋合計の予約数を見出し付近に表示する。
+     *  - 検索ページ: 「○件ヒットしました」の横にインライン表示。
+     *  - カレンダー: 見出し直下にブロック表示。
+     * 対象外ページ・未取得なら撤去。
      */
     function renderTodayCounts(): void {
       const existing = document.getElementById(`${PREFIX}-counts`);
-      if (pageMode() !== 'search' || !todayCounts) {
+      const mode = pageMode();
+      if ((mode !== 'search' && mode !== 'calendar') || !todayCounts) {
         existing?.remove();
         return;
       }
       const heading = document.querySelector('app-page-heading');
       if (!heading) return;
-      // 「○件ヒットしました」のリーフ要素 → その親にぶら下げる
+
+      // 検索ページは「○件ヒットしました」の行にインライン、それ以外は見出し直下にブロック
       const leaf = Array.from(heading.querySelectorAll<HTMLElement>('div')).find(
         (d) =>
           d.children.length === 0 &&
           /ヒットしました|件の予約/.test(d.textContent ?? ''),
       );
-      const container = leaf?.parentElement;
-      if (!container) return;
+      const inline = !!leaf?.parentElement;
+      const container = leaf?.parentElement ?? heading;
 
       let el = document.getElementById(`${PREFIX}-counts`);
       if (!el || el.parentElement !== container) {
         el?.remove();
         el = document.createElement('span');
         el.id = `${PREFIX}-counts`;
-        Object.assign(el.style, {
-          marginLeft: '8px',
-          fontWeight: '700',
-        } satisfies Partial<CSSStyleDeclaration>);
+        Object.assign(
+          el.style,
+          inline
+            ? { marginLeft: '8px', fontWeight: '700' }
+            : {
+                display: 'block',
+                marginTop: '4px',
+                fontSize: '13px',
+                fontWeight: '700',
+              },
+        );
         container.appendChild(el);
       }
 
