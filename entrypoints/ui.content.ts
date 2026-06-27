@@ -1,11 +1,12 @@
 import {
   isScheduleCapturedMessage,
   isScheduleListMessage,
-  isScheduleListCombinedMessage,
+  isTodayCountsMessage,
   isFetchDoneMessage,
   type ScheduleCapturedMessage,
   type FetchRequestMessage,
-  type SearchAllRequestMessage,
+  type TodayCountsRequestMessage,
+  type TenantCount,
   KARTE_MESSAGE_SOURCE,
 } from '@/lib/types';
 import { mapResponseToKarte, type Karte } from '@/lib/mapResponseToKarte';
@@ -39,16 +40,8 @@ export default defineContentScript({
 
     /** scheduleId → 捕捉メッセージ（詳細データ）。 */
     const cache = new Map<string, ScheduleCapturedMessage>();
-    /**
-     * 「全て印刷」の対象となる予約ID。
-     *  - 通常は MAIN が全店舗合算した結果（schedule-list-combined）で更新。
-     *  - 合算が来る前は、ページの単店舗検索（schedule-list）で暫定表示。
-     */
+    /** 「全て印刷」の対象＝今表示している検索結果（単店舗）。 */
     let listIds: string[] = [];
-    /** listIds が全店舗合算済みか（暫定の単店舗かを区別） */
-    let listCombined = false;
-    /** 合算に使われた店舗数（表示用） */
-    let tenantCount = 0;
     let latestId: string | null = null;
 
     const mapOpts = { staffNames: STAFF_NAMES };
@@ -56,21 +49,21 @@ export default defineContentScript({
     /** 「全て印刷」で再取得中の状態。null=非実行。received=今回取り直して届いたID。 */
     let pendingFetch: { wanted: string[]; received: Set<string> } | null = null;
 
-    /** 全店舗検索の二重発行防止 */
-    let combineInFlight = false;
+    /** 本日の店舗別件数（見出し横に表示）。null=未取得。 */
+    let todayCounts: TenantCount[] | null = null;
+    let countsInFlight = false;
 
-    /** MAIN に全店舗まとめ検索を依頼（検索ページでのみ・単発） */
-    function requestCombinedSearch(): void {
-      if (combineInFlight) return;
-      combineInFlight = true;
-      const req: SearchAllRequestMessage = {
+    /** MAIN に本日の店舗別件数を依頼（検索ページでのみ・単発） */
+    function requestTodayCounts(): void {
+      if (countsInFlight) return;
+      countsInFlight = true;
+      const req: TodayCountsRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
-        type: 'search-all-request',
+        type: 'today-counts-request',
       };
       window.postMessage(req, window.location.origin);
-      // 応答が来ない場合の保険
       window.setTimeout(() => {
-        combineInFlight = false;
+        countsInFlight = false; // 応答が来ない場合の保険
       }, 15_000);
     }
 
@@ -91,25 +84,19 @@ export default defineContentScript({
         return;
       }
       if (isScheduleListMessage(data)) {
-        // ページの単店舗検索。暫定で置き換えつつ、全店舗合算を依頼。
+        // 現在表示中の検索結果で置き換える（古い検索を引きずらない）
         listIds = data.ids.slice();
-        listCombined = false;
         updateButtons();
-        // 検索ページなら2店舗合算した件数に置き換える
+        // 検索ページなら本日の店舗別件数も取得して見出し横に表示
         if (/\/schedules\/search(?:[/?#]|$)/.test(window.location.pathname)) {
-          requestCombinedSearch();
+          requestTodayCounts();
         }
         return;
       }
-      if (isScheduleListCombinedMessage(data)) {
-        combineInFlight = false;
-        // 合算結果で確定（0件なら暫定の単店舗を維持）
-        if (data.ids.length > 0) {
-          listIds = data.ids.slice();
-          listCombined = true;
-          tenantCount = data.tenantCount;
-        }
-        updateButtons();
+      if (isTodayCountsMessage(data)) {
+        countsInFlight = false;
+        todayCounts = data.results;
+        renderTodayCounts();
         return;
       }
       if (isFetchDoneMessage(data)) {
@@ -361,9 +348,7 @@ export default defineContentScript({
       } satisfies Partial<CSSStyleDeclaration>);
 
       const header = document.createElement('div');
-      header.textContent = listCombined
-        ? `全て印刷 — 全${tenantCount}店舗 ${ids.length}件から選択`
-        : `全て印刷 — ${ids.length}件から選択`;
+      header.textContent = `全て印刷 — ${ids.length}件から選択`;
       Object.assign(header.style, {
         padding: '14px 18px',
         fontSize: '15px',
@@ -642,6 +627,46 @@ export default defineContentScript({
       return null;
     }
 
+    /**
+     * 見出しの「○件ヒットしました」の横に、本日の店舗別＋合計の予約数を表示する。
+     * 検索ページ以外、または未取得なら撤去。
+     */
+    function renderTodayCounts(): void {
+      const existing = document.getElementById(`${PREFIX}-counts`);
+      if (pageMode() !== 'search' || !todayCounts) {
+        existing?.remove();
+        return;
+      }
+      const heading = document.querySelector('app-page-heading');
+      if (!heading) return;
+      // 「○件ヒットしました」のリーフ要素 → その親にぶら下げる
+      const leaf = Array.from(heading.querySelectorAll<HTMLElement>('div')).find(
+        (d) =>
+          d.children.length === 0 &&
+          /ヒットしました|件の予約/.test(d.textContent ?? ''),
+      );
+      const container = leaf?.parentElement;
+      if (!container) return;
+
+      let el = document.getElementById(`${PREFIX}-counts`);
+      if (!el || el.parentElement !== container) {
+        el?.remove();
+        el = document.createElement('span');
+        el.id = `${PREFIX}-counts`;
+        Object.assign(el.style, {
+          marginLeft: '8px',
+          fontWeight: '700',
+          color: '#2b7de9',
+        } satisfies Partial<CSSStyleDeclaration>);
+        container.appendChild(el);
+      }
+
+      const total = todayCounts.reduce((s, r) => s + (r.count ?? 0), 0);
+      const parts = todayCounts.map((r) => `${r.name}: ${r.count ?? '—'}件`);
+      const text = `｜本日の予約　${parts.join('　')}　合計: ${total}件`;
+      if (el.textContent !== text) el.textContent = text; // 無駄な再設定を避ける
+    }
+
     /** ツールバーへ注入した種別（フローティング表示判断に使う） */
     interface ToolbarState {
       all: boolean;
@@ -712,7 +737,8 @@ export default defineContentScript({
      *   1) 自分のUI内だけの変化は無視する（自己発火カット）
      *   2) rAF でデバウンスし、1フレーム1回に集約する
      */
-    const ownSelector = `#${PREFIX}-fab, #${PREFIX}-dialog`;
+    // 自分が挿入した要素（カウント表示・フローティング・ダイアログ）内の変化は無視。
+    const ownSelector = `#${PREFIX}-fab, #${PREFIX}-dialog, #${PREFIX}-progress, #${PREFIX}-counts`;
 
     function isOwnMutation(record: MutationRecord): boolean {
       const t = record.target;
@@ -730,6 +756,7 @@ export default defineContentScript({
         const injected = tryInjectToolbar();
         updateButtons();
         syncFloating(injected);
+        renderTodayCounts();
       });
     }
 

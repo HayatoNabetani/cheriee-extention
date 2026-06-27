@@ -1,10 +1,9 @@
 import {
   KARTE_MESSAGE_SOURCE,
   isFetchRequestMessage,
-  isSearchAllRequestMessage,
+  isTodayCountsRequestMessage,
   type ScheduleCapturedMessage,
   type ScheduleListMessage,
-  type ScheduleListCombinedMessage,
   type FetchDoneMessage,
   type CherieeScheduleResponse,
 } from '@/lib/types';
@@ -374,43 +373,66 @@ export default defineContentScript({
       postDone(ids, errors);
     }
 
-    /* ───────── 全店舗まとめ検索（「全て印刷」用） ─────────
-     * 控えた検索ボディ（日付・条件）の tenantId だけを全店舗ぶんに差し替えて
-     * /schedules/search を叩き、結果の予約IDを合算する。
-     * origFetch を使うのでパッチに再捕捉されず、ループしない。 */
-    function postCombined(ids: string[], tenantCount: number): void {
-      const msg: ScheduleListCombinedMessage = {
-        source: KARTE_MESSAGE_SOURCE,
-        type: 'schedule-list-combined',
-        ids,
-        tenantCount,
+    /* ───────── 本日の店舗別予約数 ─────────
+     * 各店舗(tenantId)について「本日(JST 00:00〜23:59:59)」で /schedules/search を
+     * 叩き、件数を数える。origFetch を使うのでパッチに再捕捉されずループしない。
+     *
+     * 店舗(tenantId と表示名)はこの店舗構成に合わせた固定リスト。店舗が増減・改名
+     * したらここを編集する。 */
+    const TENANTS: { id: string; name: string }[] = [
+      { id: '703ac958-9334-4432-9efa-81aa06768414', name: '二子玉川' },
+      { id: 'e1ac2ad2-9c78-4bf8-a2a0-6579878fd8e5', name: 'ドッグカレッジ' },
+    ];
+
+    /** 本日(JST)の 00:00:00〜23:59:59 を +09:00 付きISO文字列で返す */
+    function todayRangeJst(): { start: string; end: string } {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(new Date());
+      const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+      const date = `${get('year')}-${get('month')}-${get('day')}`;
+      return {
+        start: `${date}T00:00:00+09:00`,
+        end: `${date}T23:59:59+09:00`,
       };
-      window.postMessage(msg, ORIGIN);
     }
 
-    async function searchAllTenants(): Promise<void> {
+    function postCounts(
+      results: { name: string; count: number | null }[],
+      reason?: 'no-token',
+    ): void {
+      window.postMessage(
+        {
+          source: KARTE_MESSAGE_SOURCE,
+          type: 'today-counts',
+          results,
+          reason,
+        },
+        ORIGIN,
+      );
+    }
+
+    async function countToday(): Promise<void> {
       const companyId = lastCompanyId;
       const token = lastAuth;
-      // 検索ボディ未取得（まだ一度も検索していない）or 認証なしなら何もしない。
-      if (!companyId || !token || !lastSearchBody) {
-        postCombined([], 0);
+      if (!companyId || !token) {
+        postCounts([], 'no-token');
         return;
       }
-      // 既知の店舗が無ければ、現在のボディの店舗だけでも対象に。
-      const tenants =
-        tenantIds.size > 0
-          ? Array.from(tenantIds)
-          : typeof lastSearchBody.tenantId === 'string'
-            ? [lastSearchBody.tenantId]
-            : [];
-      const ids = new Set<string>();
-      for (const tenantId of tenants) {
+      const { start, end } = todayRangeJst();
+      const results: { name: string; count: number | null }[] = [];
+      for (const t of TENANTS) {
         try {
           const body = JSON.stringify({
-            ...lastSearchBody,
-            tenantId,
+            tenantId: t.id,
             page: 1,
             size: 500,
+            sort: 'CREATED',
+            start,
+            end,
           });
           const res = await origFetch(
             `https://api.cheriee.jp/v2/companies/${companyId}/schedules/search`,
@@ -424,17 +446,16 @@ export default defineContentScript({
               body,
             },
           );
-          if (!res.ok) continue;
-          const data = await res.json();
-          for (const id of extractListIds(data)) ids.add(id);
+          results.push({
+            name: t.name,
+            count: res.ok ? extractListIds(await res.json()).length : null,
+          });
         } catch {
-          /* 1店舗失敗しても続行 */
+          results.push({ name: t.name, count: null });
         }
       }
-      console.info(
-        `[cheriee-karte] 全店舗検索: ${tenants.length}店舗 合計${ids.size}件`,
-      );
-      postCombined(Array.from(ids), tenants.length);
+      console.info('[cheriee-karte] 本日の店舗別件数', results);
+      postCounts(results);
     }
 
     window.addEventListener('message', (event) => {
@@ -443,8 +464,8 @@ export default defineContentScript({
         void refetch(event.data.ids);
         return;
       }
-      if (isSearchAllRequestMessage(event.data)) {
-        void searchAllTenants();
+      if (isTodayCountsRequestMessage(event.data)) {
+        void countToday();
         return;
       }
     });

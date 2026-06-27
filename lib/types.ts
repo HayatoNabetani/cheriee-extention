@@ -171,37 +171,42 @@ export function isFetchDoneMessage(
   return m.source === KARTE_MESSAGE_SOURCE && m.type === 'fetch-done';
 }
 
-/** 全店舗まとめて検索する依頼（ISOLATED → MAIN） */
-export interface SearchAllRequestMessage {
+/** 本日の店舗別予約数の取得依頼（ISOLATED → MAIN） */
+export interface TodayCountsRequestMessage {
   source: typeof KARTE_MESSAGE_SOURCE;
-  type: 'search-all-request';
+  type: 'today-counts-request';
 }
 
-export function isSearchAllRequestMessage(
+export function isTodayCountsRequestMessage(
   value: unknown,
-): value is SearchAllRequestMessage {
+): value is TodayCountsRequestMessage {
   if (typeof value !== 'object' || value === null) return false;
   const m = value as Record<string, unknown>;
-  return m.source === KARTE_MESSAGE_SOURCE && m.type === 'search-all-request';
+  return m.source === KARTE_MESSAGE_SOURCE && m.type === 'today-counts-request';
 }
 
-/** 全店舗合算した一覧結果（MAIN → ISOLATED） */
-export interface ScheduleListCombinedMessage {
+/** 1店舗ぶんの本日件数（count が null は取得失敗） */
+export interface TenantCount {
+  name: string;
+  count: number | null;
+}
+
+/** 本日の店舗別予約数（MAIN → ISOLATED） */
+export interface TodayCountsMessage {
   source: typeof KARTE_MESSAGE_SOURCE;
-  type: 'schedule-list-combined';
-  ids: string[];
-  /** 合算に使った店舗数 */
-  tenantCount: number;
+  type: 'today-counts';
+  results: TenantCount[];
+  reason?: 'no-token';
 }
 
-export function isScheduleListCombinedMessage(
+export function isTodayCountsMessage(
   value: unknown,
-): value is ScheduleListCombinedMessage {
+): value is TodayCountsMessage {
   if (typeof value !== 'object' || value === null) return false;
   const m = value as Record<string, unknown>;
   return (
     m.source === KARTE_MESSAGE_SOURCE &&
-    m.type === 'schedule-list-combined' &&
-    Array.isArray(m.ids)
+    m.type === 'today-counts' &&
+    Array.isArray(m.results)
   );
 }
