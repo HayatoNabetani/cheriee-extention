@@ -451,23 +451,29 @@ export default defineContentScript({
       );
     }
 
-    /** 指定期間で全店舗の件数を数える */
+    /**
+     * 指定期間で全店舗の件数を数える。
+     * 検索ボディ(template)の条件（カテゴリ/リソース/状態など）はそのまま使い、
+     * 店舗(tenantId)と日付(start/end)だけを差し替える。
+     */
     async function queryCounts(
       companyId: string,
       token: string,
       start: string,
       end: string,
     ): Promise<TenantCount[]> {
+      const template = lastSearchBody ?? {};
       const results: TenantCount[] = [];
       for (const t of TENANTS) {
         try {
           const body = JSON.stringify({
-            tenantId: t.id,
+            sort: 'CREATED',
+            ...template, // カテゴリ/リソース/状態などの絞り込み条件を引き継ぐ
+            tenantId: t.id, // 店舗だけ差し替え
+            start, // 日付は対象期間で上書き
+            end,
             page: 1,
             size: 500,
-            sort: 'CREATED',
-            start,
-            end,
           });
           const res = await origFetch(
             `https://api.cheriee.jp/v2/companies/${companyId}/schedules/search`,
