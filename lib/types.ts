@@ -185,17 +185,24 @@ export function isTodayCountsRequestMessage(
   return m.source === KARTE_MESSAGE_SOURCE && m.type === 'today-counts-request';
 }
 
-/** 1店舗ぶんの本日件数（count が null は取得失敗） */
+/** 1店舗ぶんの件数（count が null は取得失敗） */
 export interface TenantCount {
   name: string;
   count: number | null;
 }
 
-/** 本日の店舗別予約数（MAIN → ISOLATED） */
+/** 表示する1グループ（例: 本日 / 選択日）の店舗別件数 */
+export interface CountGroup {
+  /** 見出しラベル（例 "本日" / "6/23(火)"） */
+  label: string;
+  results: TenantCount[];
+}
+
+/** 店舗別予約数（MAIN → ISOLATED）。groups[0]=本日, [1]=選択日(任意) */
 export interface TodayCountsMessage {
   source: typeof KARTE_MESSAGE_SOURCE;
   type: 'today-counts';
-  results: TenantCount[];
+  groups: CountGroup[];
   reason?: 'no-token';
 }
 
@@ -207,6 +214,6 @@ export function isTodayCountsMessage(
   return (
     m.source === KARTE_MESSAGE_SOURCE &&
     m.type === 'today-counts' &&
-    Array.isArray(m.results)
+    Array.isArray(m.groups)
   );
 }

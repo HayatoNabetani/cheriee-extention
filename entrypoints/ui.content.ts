@@ -6,7 +6,7 @@ import {
   type ScheduleCapturedMessage,
   type FetchRequestMessage,
   type TodayCountsRequestMessage,
-  type TenantCount,
+  type CountGroup,
   KARTE_MESSAGE_SOURCE,
 } from '@/lib/types';
 import { mapResponseToKarte, type Karte } from '@/lib/mapResponseToKarte';
@@ -49,8 +49,8 @@ export default defineContentScript({
     /** 「全て印刷」で再取得中の状態。null=非実行。received=今回取り直して届いたID。 */
     let pendingFetch: { wanted: string[]; received: Set<string> } | null = null;
 
-    /** 本日の店舗別件数（見出し横に表示）。null=未取得。 */
-    let todayCounts: TenantCount[] | null = null;
+    /** 店舗別件数グループ（本日／選択日）。null=未取得。 */
+    let todayCounts: CountGroup[] | null = null;
     let countsInFlight = false;
 
     /** MAIN に本日の店舗別件数を依頼（検索ページでのみ・単発） */
@@ -95,7 +95,7 @@ export default defineContentScript({
       }
       if (isTodayCountsMessage(data)) {
         countsInFlight = false;
-        todayCounts = data.results;
+        todayCounts = data.groups;
         renderTodayCounts();
         return;
       }
@@ -661,9 +661,13 @@ export default defineContentScript({
         container.appendChild(el);
       }
 
-      const total = todayCounts.reduce((s, r) => s + (r.count ?? 0), 0);
-      const parts = todayCounts.map((r) => `${r.name}: ${r.count ?? '—'}件`);
-      const text = `｜本日の予約　${parts.join('　')}　合計: ${total}件`;
+      const text = todayCounts
+        .map((g) => {
+          const total = g.results.reduce((s, r) => s + (r.count ?? 0), 0);
+          const parts = g.results.map((r) => `${r.name}: ${r.count ?? '—'}件`);
+          return `｜${g.label}の予約　${parts.join('　')}　合計: ${total}件`;
+        })
+        .join('　');
       if (el.textContent !== text) el.textContent = text; // 無駄な再設定を避ける
     }
 

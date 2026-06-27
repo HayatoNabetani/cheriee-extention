@@ -400,30 +400,24 @@ export default defineContentScript({
       };
     }
 
-    function postCounts(
-      results: { name: string; count: number | null }[],
-      reason?: 'no-token',
-    ): void {
+    type TenantCount = { name: string; count: number | null };
+    type CountGroup = { label: string; results: TenantCount[] };
+
+    function postCounts(groups: CountGroup[], reason?: 'no-token'): void {
       window.postMessage(
-        {
-          source: KARTE_MESSAGE_SOURCE,
-          type: 'today-counts',
-          results,
-          reason,
-        },
+        { source: KARTE_MESSAGE_SOURCE, type: 'today-counts', groups, reason },
         ORIGIN,
       );
     }
 
-    async function countToday(): Promise<void> {
-      const companyId = lastCompanyId;
-      const token = lastAuth;
-      if (!companyId || !token) {
-        postCounts([], 'no-token');
-        return;
-      }
-      const { start, end } = todayRangeJst();
-      const results: { name: string; count: number | null }[] = [];
+    /** 指定期間で全店舗の件数を数える */
+    async function queryCounts(
+      companyId: string,
+      token: string,
+      start: string,
+      end: string,
+    ): Promise<TenantCount[]> {
+      const results: TenantCount[] = [];
       for (const t of TENANTS) {
         try {
           const body = JSON.stringify({
@@ -454,8 +448,58 @@ export default defineContentScript({
           results.push({ name: t.name, count: null });
         }
       }
-      console.info('[cheriee-karte] 本日の店舗別件数', results);
-      postCounts(results);
+      return results;
+    }
+
+    /** ISO(...+09:00) の日付部分(YYYY-MM-DD) */
+    const isoDate = (s: string) => s.slice(0, 10);
+
+    /** 選択期間のラベル（例 "6/23(火)" / "6/23〜6/25"） */
+    function rangeLabel(start: string, end: string): string {
+      const sd = isoDate(start);
+      const ed = isoDate(end);
+      const md = (d: string) => {
+        const [, m, day] = d.split('-');
+        return `${Number(m)}/${Number(day)}`;
+      };
+      if (sd === ed) {
+        const wd = new Intl.DateTimeFormat('ja-JP', {
+          timeZone: 'Asia/Tokyo',
+          weekday: 'short',
+        }).format(new Date(`${sd}T12:00:00+09:00`));
+        return `${md(sd)}(${wd})`;
+      }
+      return `${md(sd)}〜${md(ed)}`;
+    }
+
+    async function computeCounts(): Promise<void> {
+      const companyId = lastCompanyId;
+      const token = lastAuth;
+      if (!companyId || !token) {
+        postCounts([], 'no-token');
+        return;
+      }
+      const today = todayRangeJst();
+      const groups: CountGroup[] = [
+        { label: '本日', results: await queryCounts(companyId, token, today.start, today.end) },
+      ];
+
+      // 検索で選択中の期間が「本日」と異なれば、その期間も追加
+      const selStart = lastSearchBody?.start;
+      const selEnd = lastSearchBody?.end;
+      if (typeof selStart === 'string' && typeof selEnd === 'string') {
+        const isToday =
+          isoDate(selStart) === isoDate(today.start) &&
+          isoDate(selEnd) === isoDate(today.end);
+        if (!isToday) {
+          groups.push({
+            label: rangeLabel(selStart, selEnd),
+            results: await queryCounts(companyId, token, selStart, selEnd),
+          });
+        }
+      }
+      console.info('[cheriee-karte] 店舗別件数', groups);
+      postCounts(groups);
     }
 
     window.addEventListener('message', (event) => {
@@ -465,7 +509,7 @@ export default defineContentScript({
         return;
       }
       if (isTodayCountsRequestMessage(event.data)) {
-        void countToday();
+        void computeCounts();
         return;
       }
     });
