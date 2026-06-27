@@ -656,19 +656,44 @@ export default defineContentScript({
         Object.assign(el.style, {
           marginLeft: '8px',
           fontWeight: '700',
-          color: '#2b7de9',
         } satisfies Partial<CSSStyleDeclaration>);
         container.appendChild(el);
       }
 
-      const text = todayCounts
-        .map((g) => {
-          const total = g.results.reduce((s, r) => s + (r.count ?? 0), 0);
-          const parts = g.results.map((r) => `${r.name}: ${r.count ?? '—'}件`);
-          return `｜${g.label}の予約　${parts.join('　')}　合計: ${total}件`;
-        })
-        .join('　');
-      if (el.textContent !== text) el.textContent = text; // 無駄な再設定を避ける
+      // グループ（本日／選択日）ごとに色分け。内容が同じなら作り直さない。
+      const sig = JSON.stringify(todayCounts);
+      if (el.dataset.sig === sig) return;
+      el.dataset.sig = sig;
+      el.textContent = '';
+
+      const GROUP_COLORS = ['#2b7de9', '#e8730c']; // 本日=青 / 選択日=橙
+      const STORE_COLOR = '#374151'; // 店舗名・件数は濃いグレー
+      todayCounts.forEach((g, gi) => {
+        const color = GROUP_COLORS[gi % GROUP_COLORS.length]!;
+        const groupSpan = document.createElement('span');
+        groupSpan.style.marginLeft = gi === 0 ? '0' : '14px';
+
+        const label = document.createElement('b');
+        label.textContent = `｜${g.label}の予約`;
+        label.style.color = color;
+        groupSpan.appendChild(label);
+
+        for (const r of g.results) {
+          const part = document.createElement('span');
+          part.textContent = `　${r.name}: ${r.count ?? '—'}件`;
+          part.style.color = STORE_COLOR;
+          part.style.fontWeight = '600';
+          groupSpan.appendChild(part);
+        }
+
+        const total = g.results.reduce((s, r) => s + (r.count ?? 0), 0);
+        const tot = document.createElement('b');
+        tot.textContent = `　合計: ${total}件`;
+        tot.style.color = color;
+        groupSpan.appendChild(tot);
+
+        el!.appendChild(groupSpan);
+      });
     }
 
     /** ツールバーへ注入した種別（フローティング表示判断に使う） */
