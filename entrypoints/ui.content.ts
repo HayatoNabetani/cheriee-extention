@@ -1,9 +1,11 @@
 import {
   isScheduleCapturedMessage,
   isScheduleListMessage,
+  isScheduleListCombinedMessage,
   isFetchDoneMessage,
   type ScheduleCapturedMessage,
   type FetchRequestMessage,
+  type SearchAllRequestMessage,
   KARTE_MESSAGE_SOURCE,
 } from '@/lib/types';
 import { mapResponseToKarte, type Karte } from '@/lib/mapResponseToKarte';
@@ -38,16 +40,39 @@ export default defineContentScript({
     /** scheduleId → 捕捉メッセージ（詳細データ）。 */
     const cache = new Map<string, ScheduleCapturedMessage>();
     /**
-     * 「今表示している一覧」の予約ID。一覧APIを横取りするたびに置き換える
-     * （accumulate しない）。これにより「全て印刷」の件数が現在の検索結果と一致する。
+     * 「全て印刷」の対象となる予約ID。
+     *  - 通常は MAIN が全店舗合算した結果（schedule-list-combined）で更新。
+     *  - 合算が来る前は、ページの単店舗検索（schedule-list）で暫定表示。
      */
     let listIds: string[] = [];
+    /** listIds が全店舗合算済みか（暫定の単店舗かを区別） */
+    let listCombined = false;
+    /** 合算に使われた店舗数（表示用） */
+    let tenantCount = 0;
     let latestId: string | null = null;
 
     const mapOpts = { staffNames: STAFF_NAMES };
 
     /** 「全て印刷」で再取得中の状態。null=非実行。received=今回取り直して届いたID。 */
     let pendingFetch: { wanted: string[]; received: Set<string> } | null = null;
+
+    /** 全店舗検索の二重発行防止 */
+    let combineInFlight = false;
+
+    /** MAIN に全店舗まとめ検索を依頼（検索ページでのみ・単発） */
+    function requestCombinedSearch(): void {
+      if (combineInFlight) return;
+      combineInFlight = true;
+      const req: SearchAllRequestMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'search-all-request',
+      };
+      window.postMessage(req, window.location.origin);
+      // 応答が来ない場合の保険
+      window.setTimeout(() => {
+        combineInFlight = false;
+      }, 15_000);
+    }
 
     /* ───────── 捕捉データ受信 ───────── */
     window.addEventListener('message', (event) => {
@@ -66,8 +91,24 @@ export default defineContentScript({
         return;
       }
       if (isScheduleListMessage(data)) {
-        // 現在表示中の一覧で置き換える（古い検索結果を引きずらない）
+        // ページの単店舗検索。暫定で置き換えつつ、全店舗合算を依頼。
         listIds = data.ids.slice();
+        listCombined = false;
+        updateButtons();
+        // 検索ページなら2店舗合算した件数に置き換える
+        if (/\/schedules\/search(?:[/?#]|$)/.test(window.location.pathname)) {
+          requestCombinedSearch();
+        }
+        return;
+      }
+      if (isScheduleListCombinedMessage(data)) {
+        combineInFlight = false;
+        // 合算結果で確定（0件なら暫定の単店舗を維持）
+        if (data.ids.length > 0) {
+          listIds = data.ids.slice();
+          listCombined = true;
+          tenantCount = data.tenantCount;
+        }
         updateButtons();
         return;
       }
@@ -320,7 +361,9 @@ export default defineContentScript({
       } satisfies Partial<CSSStyleDeclaration>);
 
       const header = document.createElement('div');
-      header.textContent = '一括印刷 — 印刷する予約を選択';
+      header.textContent = listCombined
+        ? `全て印刷 — 全${tenantCount}店舗 ${ids.length}件から選択`
+        : `全て印刷 — ${ids.length}件から選択`;
       Object.assign(header.style, {
         padding: '14px 18px',
         fontSize: '15px',

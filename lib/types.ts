@@ -170,3 +170,38 @@ export function isFetchDoneMessage(
   const m = value as Record<string, unknown>;
   return m.source === KARTE_MESSAGE_SOURCE && m.type === 'fetch-done';
 }
+
+/** 全店舗まとめて検索する依頼（ISOLATED → MAIN） */
+export interface SearchAllRequestMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'search-all-request';
+}
+
+export function isSearchAllRequestMessage(
+  value: unknown,
+): value is SearchAllRequestMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return m.source === KARTE_MESSAGE_SOURCE && m.type === 'search-all-request';
+}
+
+/** 全店舗合算した一覧結果（MAIN → ISOLATED） */
+export interface ScheduleListCombinedMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'schedule-list-combined';
+  ids: string[];
+  /** 合算に使った店舗数 */
+  tenantCount: number;
+}
+
+export function isScheduleListCombinedMessage(
+  value: unknown,
+): value is ScheduleListCombinedMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return (
+    m.source === KARTE_MESSAGE_SOURCE &&
+    m.type === 'schedule-list-combined' &&
+    Array.isArray(m.ids)
+  );
+}

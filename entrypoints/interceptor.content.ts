@@ -1,8 +1,10 @@
 import {
   KARTE_MESSAGE_SOURCE,
   isFetchRequestMessage,
+  isSearchAllRequestMessage,
   type ScheduleCapturedMessage,
   type ScheduleListMessage,
+  type ScheduleListCombinedMessage,
   type FetchDoneMessage,
   type CherieeScheduleResponse,
 } from '@/lib/types';
@@ -36,9 +38,59 @@ export default defineContentScript({
     let lastCompanyId: string | undefined;
     let lastAuth: string | undefined;
 
+    // 全店舗まとめ検索のため、検索ボディ（日付・条件）と全店舗IDを保持。
+    let lastSearchBody: Record<string, unknown> | null = null;
+    const tenantIds = new Set<string>();
+
     function rememberCreds(companyId?: string, auth?: string): void {
       if (companyId) lastCompanyId = companyId;
       if (auth) lastAuth = auth;
+    }
+
+    /** 検索リクエストのボディ（POST JSON）を控える。tenantId も収集。 */
+    function captureSearchBody(rawBody: unknown): void {
+      if (typeof rawBody !== 'string') return;
+      try {
+        const obj = JSON.parse(rawBody) as Record<string, unknown>;
+        lastSearchBody = obj;
+        if (typeof obj.tenantId === 'string') tenantIds.add(obj.tenantId);
+        console.info(
+          `[cheriee-karte] search req: tenant=${String(obj.tenantId)} ${String(obj.start)}..${String(obj.end)} (known tenants: ${tenantIds.size})`,
+        );
+      } catch {
+        /* JSONでなければ無視 */
+      }
+    }
+
+    /** 店舗一覧（URLに tenant を含む）レスポンスから tenantId を収集。 */
+    function captureTenants(url: string, data: unknown): void {
+      let arr: unknown[] | null = null;
+      if (Array.isArray(data)) arr = data;
+      else if (data && typeof data === 'object') {
+        for (const key of ['data', 'tenants', 'items', 'results', 'rows', 'list']) {
+          const v = (data as Record<string, unknown>)[key];
+          if (Array.isArray(v)) {
+            arr = v;
+            break;
+          }
+        }
+      }
+      if (!arr) return;
+      let added = 0;
+      for (const t of arr) {
+        if (t && typeof t === 'object') {
+          const id = (t as Record<string, unknown>).id;
+          if (typeof id === 'string' && !tenantIds.has(id)) {
+            tenantIds.add(id);
+            added++;
+          }
+        }
+      }
+      if (added > 0) {
+        console.info(
+          `[cheriee-karte] tenants captured: ${url} → 全${tenantIds.size}店舗`,
+        );
+      }
     }
 
     function emit(
@@ -111,8 +163,17 @@ export default defineContentScript({
       return ids;
     }
 
-    /** 横取りした生テキスト/JSONを詳細 or 一覧として処理 */
+    /** 横取りした生テキスト/JSONを詳細 / 一覧 / 店舗一覧 として処理 */
     function handleBody(url: string | undefined, parse: () => unknown): void {
+      // 店舗一覧（URLに tenant を含む）→ tenantId 収集
+      if (url && /tenant/i.test(url) && !LIST_RE.test(url) && !SCHEDULE_RE.test(url)) {
+        try {
+          captureTenants(url, parse());
+        } catch {
+          /* 店舗一覧でなければ無視 */
+        }
+        return;
+      }
       const detail = detailMatch(url);
       if (detail) {
         rememberCreds(detail.companyId, undefined);
@@ -179,7 +240,12 @@ export default defineContentScript({
 
       const promise = origFetch.apply(this, args);
 
-      if (detailMatch(url) || listMatch(url)) {
+      const inspect =
+        !!detailMatch(url) || !!listMatch(url) || /tenant/i.test(url);
+      if (listMatch(url) && typeof init?.body === 'string') {
+        captureSearchBody(init.body); // 検索条件（日付等）を控える
+      }
+      if (inspect) {
         const auth =
           authFromHeaders(init?.headers) ??
           (input instanceof Request
@@ -239,7 +305,12 @@ export default defineContentScript({
 
     proto.send = function (this: PatchedXHR, ...args: unknown[]) {
       const url = this.__cheriee_url;
-      if (detailMatch(url) || listMatch(url)) {
+      if (listMatch(url) && typeof args[0] === 'string') {
+        captureSearchBody(args[0]); // 検索条件（日付等）を控える
+      }
+      const inspect =
+        !!detailMatch(url) || !!listMatch(url) || (!!url && /tenant/i.test(url));
+      if (inspect) {
         this.addEventListener('load', () => {
           rememberCreds(undefined, this.__cheriee_auth);
           const rt = this.responseType;
@@ -303,10 +374,79 @@ export default defineContentScript({
       postDone(ids, errors);
     }
 
+    /* ───────── 全店舗まとめ検索（「全て印刷」用） ─────────
+     * 控えた検索ボディ（日付・条件）の tenantId だけを全店舗ぶんに差し替えて
+     * /schedules/search を叩き、結果の予約IDを合算する。
+     * origFetch を使うのでパッチに再捕捉されず、ループしない。 */
+    function postCombined(ids: string[], tenantCount: number): void {
+      const msg: ScheduleListCombinedMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'schedule-list-combined',
+        ids,
+        tenantCount,
+      };
+      window.postMessage(msg, ORIGIN);
+    }
+
+    async function searchAllTenants(): Promise<void> {
+      const companyId = lastCompanyId;
+      const token = lastAuth;
+      // 検索ボディ未取得（まだ一度も検索していない）or 認証なしなら何もしない。
+      if (!companyId || !token || !lastSearchBody) {
+        postCombined([], 0);
+        return;
+      }
+      // 既知の店舗が無ければ、現在のボディの店舗だけでも対象に。
+      const tenants =
+        tenantIds.size > 0
+          ? Array.from(tenantIds)
+          : typeof lastSearchBody.tenantId === 'string'
+            ? [lastSearchBody.tenantId]
+            : [];
+      const ids = new Set<string>();
+      for (const tenantId of tenants) {
+        try {
+          const body = JSON.stringify({
+            ...lastSearchBody,
+            tenantId,
+            page: 1,
+            size: 500,
+          });
+          const res = await origFetch(
+            `https://api.cheriee.jp/v2/companies/${companyId}/schedules/search`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: token,
+                'Accept-Language': 'ja',
+                'Content-Type': 'application/json',
+              },
+              body,
+            },
+          );
+          if (!res.ok) continue;
+          const data = await res.json();
+          for (const id of extractListIds(data)) ids.add(id);
+        } catch {
+          /* 1店舗失敗しても続行 */
+        }
+      }
+      console.info(
+        `[cheriee-karte] 全店舗検索: ${tenants.length}店舗 合計${ids.size}件`,
+      );
+      postCombined(Array.from(ids), tenants.length);
+    }
+
     window.addEventListener('message', (event) => {
       if (event.source !== window || event.origin !== ORIGIN) return;
-      if (!isFetchRequestMessage(event.data)) return;
-      void refetch(event.data.ids);
+      if (isFetchRequestMessage(event.data)) {
+        void refetch(event.data.ids);
+        return;
+      }
+      if (isSearchAllRequestMessage(event.data)) {
+        void searchAllTenants();
+        return;
+      }
     });
   },
 });
