@@ -17,8 +17,8 @@ import { renderKarte, renderKartes } from '@/lib/renderKarte';
  * 予約に「🖨 印刷」「🖨 全て印刷」ボタンを出す。
  *
  * - 単票印刷: 現在開いている予約をカルテ印刷。
- * - 全て印刷: 現在の検索条件に合致した結果（一覧API）を保存済みトークンで最新に
- *   取得し直し、選択ダイアログを挟まずそのまま全件まとめて印刷（ダウンロード方式）。
+ * - 全て印刷: 一覧APIで把握した全予約を、未取得分は保存済みトークンで自動再取得して
+ *   から、全件チェック済みの選択ダイアログ経由でまとめて印刷。
  *
  * 印刷は非表示 iframe 経由で行い、別ウィンドウを開かず印刷ダイアログのみ出す。
  *
@@ -260,8 +260,7 @@ export default defineContentScript({
         // 一部のみ失敗。届いた分は最新、残りはキャッシュ（あれば）で続行。
         console.warn(`[cheriee-karte] 再取得に ${errors} 件失敗しました`);
       }
-      // 検索条件に合致した結果をそのまま全件印刷（選択ダイアログは挟まない）
-      printBatch(targetIds);
+      openBatchDialog(targetIds);
     }
 
     /* 取得中の進捗オーバーレイ */
@@ -305,6 +304,176 @@ export default defineContentScript({
 
     function hideFetchProgress(): void {
       document.getElementById(`${PREFIX}-progress`)?.remove();
+    }
+
+    /* ───────── 一括印刷の選択ダイアログ ─────────
+     * 対象は「今回の検索結果」(targetIds)に限定する。cache 全体ではないので、
+     * 検索を切り替えても前回ぶんが混ざらない。 */
+    function openBatchDialog(targetIds: string[] = allTargetIds()): void {
+      // 今回の対象のうち、データが取得できているものだけ表示
+      const ids = targetIds.filter((id) => cache.has(id));
+      if (ids.length === 0) {
+        alert(
+          '印刷できる予約データがありません。\n一覧を再読み込みしてから、もう一度お試しください。',
+        );
+        return;
+      }
+      // 既存ダイアログがあれば閉じる
+      document.getElementById(`${PREFIX}-dialog`)?.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = `${PREFIX}-dialog`;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: '0',
+        background: 'rgba(0,0,0,.4)',
+        zIndex: '2147483647',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const panel = document.createElement('div');
+      Object.assign(panel.style, {
+        background: '#fff',
+        width: 'min(560px, 92vw)',
+        maxHeight: '82vh',
+        borderRadius: '10px',
+        boxShadow: '0 8px 30px rgba(0,0,0,.35)',
+        display: 'flex',
+        flexDirection: 'column',
+        fontFamily:
+          '"Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo",sans-serif',
+        color: '#111',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const header = document.createElement('div');
+      header.textContent = `全て印刷 — ${ids.length}件から選択`;
+      Object.assign(header.style, {
+        padding: '14px 18px',
+        fontSize: '15px',
+        fontWeight: '700',
+        borderBottom: '1px solid #eee',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const list = document.createElement('div');
+      Object.assign(list.style, {
+        padding: '8px 18px',
+        overflowY: 'auto',
+        flex: '1',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const checkboxes: HTMLInputElement[] = [];
+      // 今回の対象IDのみ（cache 全体ではない）。期間でソートして並べる。
+      const entries = ids
+        .map((id) => {
+          const captured = cache.get(id)!;
+          return { id, karte: mapResponseToKarte(captured.data, mapOpts) };
+        })
+        .sort((a, b) =>
+          (a.karte.period || '').localeCompare(b.karte.period || ''),
+        );
+
+      for (const { id, karte } of entries) {
+        const row = document.createElement('label');
+        Object.assign(row.style, {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          padding: '8px 4px',
+          borderBottom: '1px solid #f2f2f2',
+          cursor: 'pointer',
+          fontSize: '13px',
+        } satisfies Partial<CSSStyleDeclaration>);
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.dataset.id = id;
+        checkboxes.push(cb);
+
+        const text = document.createElement('div');
+        const title = document.createElement('div');
+        title.textContent =
+          `${karte.animalName || '(名称不明)'}` +
+          `${karte.breed ? `（${karte.breed}）` : ''}` +
+          `${karte.canceled ? ' ⚠キャンセル' : ''}`;
+        title.style.fontWeight = '600';
+        const sub = document.createElement('div');
+        sub.textContent =
+          `${karte.period || '期間不明'}　${karte.code ? `予約番号 ${karte.code}` : ''}`;
+        Object.assign(sub.style, { color: '#666', fontSize: '11px' });
+        text.append(title, sub);
+
+        row.append(cb, text);
+        list.appendChild(row);
+      }
+
+      const footer = document.createElement('div');
+      Object.assign(footer.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '12px 18px',
+        borderTop: '1px solid #eee',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const mkBtn = (label: string, primary = false): HTMLButtonElement => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        Object.assign(b.style, {
+          padding: '8px 14px',
+          fontSize: '13px',
+          borderRadius: '6px',
+          cursor: 'pointer',
+          border: primary ? 'none' : '1px solid #ccc',
+          background: primary ? '#2b7de9' : '#fff',
+          color: primary ? '#fff' : '#333',
+          fontWeight: primary ? '600' : '400',
+        } satisfies Partial<CSSStyleDeclaration>);
+        return b;
+      };
+
+      const selectAll = mkBtn('全選択');
+      const deselectAll = mkBtn('全解除');
+      const spacer = document.createElement('div');
+      spacer.style.flex = '1';
+      const cancelBtn = mkBtn('キャンセル');
+      const printBtn = mkBtn('印刷', true);
+
+      const updatePrintLabel = () => {
+        const n = checkboxes.filter((c) => c.checked).length;
+        printBtn.textContent = `印刷（${n}件）`;
+        printBtn.disabled = n === 0;
+        printBtn.style.opacity = n === 0 ? '0.5' : '1';
+      };
+      checkboxes.forEach((c) => c.addEventListener('change', updatePrintLabel));
+      selectAll.addEventListener('click', () => {
+        checkboxes.forEach((c) => (c.checked = true));
+        updatePrintLabel();
+      });
+      deselectAll.addEventListener('click', () => {
+        checkboxes.forEach((c) => (c.checked = false));
+        updatePrintLabel();
+      });
+
+      const close = () => overlay.remove();
+      cancelBtn.addEventListener('click', close);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close();
+      });
+      printBtn.addEventListener('click', () => {
+        const ids = checkboxes.filter((c) => c.checked).map((c) => c.dataset.id!);
+        close();
+        printBatch(ids);
+      });
+
+      footer.append(selectAll, deselectAll, spacer, cancelBtn, printBtn);
+      panel.append(header, list, footer);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+      updatePrintLabel();
     }
 
     /* ───────── フローティングボタン群 ───────── */
