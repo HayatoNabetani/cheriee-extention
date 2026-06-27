@@ -489,7 +489,7 @@ export default defineContentScript({
       const singleBtn = document.createElement('button');
       singleBtn.id = `${PREFIX}-single`;
       singleBtn.type = 'button';
-      singleBtn.textContent = '🖨 印刷';
+      singleBtn.textContent = '🖨 カルテ印刷';
       singleBtn.title = 'この予約をご予約カルテ形式で印刷します';
       style(singleBtn, true);
       singleBtn.addEventListener('click', printSingle);
@@ -622,7 +622,7 @@ export default defineContentScript({
         const el =
           wantCtx === 'all'
             ? makeNativeButton('全て印刷', 'fa-print', startPrintAll)
-            : makeNativeButton('印刷', 'fa-print', printSingle);
+            : makeNativeButton('カルテ印刷', 'fa-print', printSingle);
         el.dataset.ctx = wantCtx;
         row.appendChild(el);
         console.info('[cheriee-karte] ツールバーに印刷ボタンを注入しました', wantCtx);
