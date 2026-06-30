@@ -591,14 +591,20 @@ export default defineContentScript({
         postPrintIds([], 'no-range');
         return;
       }
+      // 件数表示と同じく、検索条件テンプレート（カテゴリ・日付の絞り込み方など）を
+      // 使い、店舗(tenantId)だけ全店舗に差し替える。これで画面の件数と一致する。
+      // 最終的なカテゴリ＝ペットホテル絞りは ISOLATED 側が詳細の category で担保。
+      const template = lastSearchBody ?? {};
+      console.info('[cheriee-karte] 印刷 検索テンプレート', template);
       const ids = new Set<string>();
       for (const t of TENANTS) {
         try {
           const body = JSON.stringify({
-            tenantId: t.id,
-            start: sel.start,
-            end: sel.end,
             sort: 'CREATED',
+            ...template,
+            tenantId: t.id, // 店舗だけ差し替え
+            start: sel.start, // 期間は表示中で上書き
+            end: sel.end,
             page: 1,
             size: 500,
           });
