@@ -483,8 +483,10 @@ export default defineContentScript({
 
         const text = document.createElement('div');
         const title = document.createElement('div');
+        const owner = karte.contact.name || '(飼い主名不明)';
         title.textContent =
-          `${karte.animalName || '(名称不明)'}` +
+          `${owner}` +
+          `${karte.animalName ? `　／　${karte.animalName}` : ''}` +
           `${karte.breed ? `（${karte.breed}）` : ''}` +
           `${karte.canceled ? ' ⚠キャンセル' : ''}`;
         title.style.fontWeight = '600';
