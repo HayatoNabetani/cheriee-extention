@@ -290,7 +290,7 @@ export default defineContentScript({
       if (reason === 'no-range') {
         hideFetchProgress();
         alert(
-          '対象期間を取得できませんでした。\n予約の検索（その日など）を表示してから「全て印刷」を押してください。',
+          '対象期間を取得できませんでした。\n予約の検索（その日など）を表示してから「ホテル予約印刷」を押してください。',
         );
         return;
       }
@@ -437,7 +437,7 @@ export default defineContentScript({
       } satisfies Partial<CSSStyleDeclaration>);
 
       const header = document.createElement('div');
-      header.textContent = `全て印刷 — ${ids.length}件から選択`;
+      header.textContent = `ホテル予約印刷 — ${ids.length}件から選択`;
       Object.assign(header.style, {
         padding: '14px 18px',
         fontSize: '15px',
@@ -598,7 +598,7 @@ export default defineContentScript({
       const batchBtn = document.createElement('button');
       batchBtn.id = `${PREFIX}-batch`;
       batchBtn.type = 'button';
-      batchBtn.textContent = '🖨 全て印刷';
+      batchBtn.textContent = '🖨 ホテル予約印刷';
       batchBtn.title = '一覧の全予約をまとめて印刷します（未取得分は自動取得）';
       style(batchBtn, false);
       batchBtn.addEventListener('click', startPrintAll);
@@ -631,7 +631,7 @@ export default defineContentScript({
       ) as HTMLButtonElement | null;
       if (batch) {
         // 全店舗・ペットホテルで印刷するため、検索結果の件数は出さない
-        batch.textContent = '🖨 全て印刷';
+        batch.textContent = '🖨 ホテル予約印刷';
       }
     }
 
@@ -820,7 +820,7 @@ export default defineContentScript({
       if (wantCtx && !row.querySelector(`.${TB_MARK}`)) {
         const el =
           wantCtx === 'all'
-            ? makeNativeButton('全て印刷', 'fa-print', startPrintAll)
+            ? makeNativeButton('ホテル予約印刷', 'fa-print', startPrintAll)
             : makeNativeButton('カルテ印刷', 'fa-print', printSingle);
         el.dataset.ctx = wantCtx;
         row.appendChild(el);
