@@ -2,6 +2,7 @@ import {
   KARTE_MESSAGE_SOURCE,
   isFetchRequestMessage,
   isTodayCountsRequestMessage,
+  isGatherPrintRequestMessage,
   type ScheduleCapturedMessage,
   type ScheduleListMessage,
   type FetchDoneMessage,
@@ -568,6 +569,63 @@ export default defineContentScript({
       postCounts(groups);
     }
 
+    /* ───────── 「全て印刷」用: 全店舗・対象期間の予約IDを集める ─────────
+     * 現在の絞り込みは使わず、表示中の期間で全店舗を検索する。カテゴリの
+     * ペットホテル絞り込みは ISOLATED 側が詳細の category で判定する。 */
+    function postPrintIds(ids: string[], reason?: 'no-token' | 'no-range'): void {
+      window.postMessage(
+        { source: KARTE_MESSAGE_SOURCE, type: 'print-ids', ids, reason },
+        ORIGIN,
+      );
+    }
+
+    async function gatherForPrint(): Promise<void> {
+      const companyId = lastCompanyId;
+      const token = lastAuth;
+      if (!companyId || !token) {
+        postPrintIds([], 'no-token');
+        return;
+      }
+      const sel = selectedRange();
+      if (!sel) {
+        postPrintIds([], 'no-range');
+        return;
+      }
+      const ids = new Set<string>();
+      for (const t of TENANTS) {
+        try {
+          const body = JSON.stringify({
+            tenantId: t.id,
+            start: sel.start,
+            end: sel.end,
+            sort: 'CREATED',
+            page: 1,
+            size: 500,
+          });
+          const res = await origFetch(
+            `https://api.cheriee.jp/v2/companies/${companyId}/schedules/search`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: token,
+                'Accept-Language': 'ja',
+                'Content-Type': 'application/json',
+              },
+              body,
+            },
+          );
+          if (!res.ok) continue;
+          for (const id of extractListIds(await res.json())) ids.add(id);
+        } catch {
+          /* 1店舗失敗しても続行 */
+        }
+      }
+      console.info(
+        `[cheriee-karte] 印刷対象収集: 全${TENANTS.length}店舗 ${ids.size}件（期間 ${sel.start}..${sel.end}）`,
+      );
+      postPrintIds([...ids]);
+    }
+
     window.addEventListener('message', (event) => {
       if (event.source !== window || event.origin !== ORIGIN) return;
       if (isFetchRequestMessage(event.data)) {
@@ -576,6 +634,10 @@ export default defineContentScript({
       }
       if (isTodayCountsRequestMessage(event.data)) {
         void computeCounts();
+        return;
+      }
+      if (isGatherPrintRequestMessage(event.data)) {
+        void gatherForPrint();
         return;
       }
     });

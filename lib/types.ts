@@ -186,6 +186,42 @@ export function isRangeCapturedMessage(
   return m.source === KARTE_MESSAGE_SOURCE && m.type === 'range-captured';
 }
 
+/** 「全て印刷」用に、全店舗・対象期間の予約IDを集める依頼（ISOLATED → MAIN） */
+export interface GatherPrintRequestMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'gather-print-request';
+}
+
+export function isGatherPrintRequestMessage(
+  value: unknown,
+): value is GatherPrintRequestMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return (
+    m.source === KARTE_MESSAGE_SOURCE && m.type === 'gather-print-request'
+  );
+}
+
+/** 集めた予約ID（全店舗・対象期間）の返却（MAIN → ISOLATED） */
+export interface PrintIdsMessage {
+  source: typeof KARTE_MESSAGE_SOURCE;
+  type: 'print-ids';
+  ids: string[];
+  reason?: 'no-token' | 'no-range';
+}
+
+export function isPrintIdsMessage(
+  value: unknown,
+): value is PrintIdsMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return (
+    m.source === KARTE_MESSAGE_SOURCE &&
+    m.type === 'print-ids' &&
+    Array.isArray(m.ids)
+  );
+}
+
 /** 本日の店舗別予約数の取得依頼（ISOLATED → MAIN） */
 export interface TodayCountsRequestMessage {
   source: typeof KARTE_MESSAGE_SOURCE;

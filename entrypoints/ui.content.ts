@@ -3,10 +3,12 @@ import {
   isScheduleListMessage,
   isTodayCountsMessage,
   isRangeCapturedMessage,
+  isPrintIdsMessage,
   isFetchDoneMessage,
   type ScheduleCapturedMessage,
   type FetchRequestMessage,
   type TodayCountsRequestMessage,
+  type GatherPrintRequestMessage,
   type CountGroup,
   KARTE_MESSAGE_SOURCE,
 } from '@/lib/types';
@@ -126,6 +128,10 @@ export default defineContentScript({
         renderTodayCounts();
         return;
       }
+      if (isPrintIdsMessage(data)) {
+        onPrintIdsGathered(data.ids, data.reason);
+        return;
+      }
       if (isFetchDoneMessage(data)) {
         finishPrintAll(data.errors, data.reason);
         return;
@@ -240,26 +246,67 @@ export default defineContentScript({
       return listIds.length > 0 ? listIds.slice() : Array.from(cache.keys());
     }
 
+    /**
+     * 「全て印刷」: 現在の絞り込みに関係なく、表示中の期間で全店舗の予約を集め、
+     * カテゴリ＝ペットホテルのものだけを印刷する。
+     * (1) MAIN に全店舗・期間のID収集を依頼 → (2) 詳細を取得 →
+     * (3) category がホテルのものに絞って選択ダイアログ。
+     */
+    let gathering = false;
+
     function startPrintAll(): void {
-      if (pendingFetch) return; // 取得中は無視
-      const ids = allTargetIds();
-      if (ids.length === 0) {
+      if (pendingFetch || gathering) return;
+      gathering = true;
+      showFetchProgress();
+      setProgressText('印刷対象を集計中…（全店舗・ペットホテル）');
+      const req: GatherPrintRequestMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'gather-print-request',
+      };
+      window.postMessage(req, window.location.origin);
+      window.setTimeout(() => {
+        if (gathering) {
+          gathering = false;
+          hideFetchProgress();
+          alert('印刷対象の集計がタイムアウトしました。もう一度お試しください。');
+        }
+      }, 30_000);
+    }
+
+    /** MAIN から全店舗・期間のIDが返ってきた → 詳細取得を開始 */
+    function onPrintIdsGathered(
+      ids: string[],
+      reason?: 'no-token' | 'no-range',
+    ): void {
+      if (!gathering) return;
+      gathering = false;
+      if (reason === 'no-token') {
+        hideFetchProgress();
         alert(
-          '印刷対象の予約が見つかりません。\n予約一覧（その日の予約など）を表示してから「全て印刷」を押してください。',
+          '認証情報を取得できませんでした。\n一覧を再読み込みしてから、もう一度お試しください。',
         );
         return;
       }
-      // カテゴリ・時間・備考などの変更を反映するため、対象を全件 最新に取り直す。
-      // （取得できなかった分は、既にキャッシュ済みの内容があればそれで代替する）
+      if (reason === 'no-range') {
+        hideFetchProgress();
+        alert(
+          '対象期間を取得できませんでした。\n予約の検索（その日など）を表示してから「全て印刷」を押してください。',
+        );
+        return;
+      }
+      if (ids.length === 0) {
+        hideFetchProgress();
+        alert('対象期間の予約が見つかりませんでした。');
+        return;
+      }
       pendingFetch = { wanted: ids, received: new Set() };
-      showFetchProgress();
+      updateFetchProgress();
       const req: FetchRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
         type: 'fetch-request',
         ids,
       };
       window.postMessage(req, window.location.origin);
-      // 念のためのタイムアウト（MAINから fetch-done が来ない場合）。件数に応じて延長。
       window.setTimeout(
         () => {
           if (pendingFetch) finishPrintAll(0);
@@ -270,7 +317,7 @@ export default defineContentScript({
 
     function finishPrintAll(errors: number, reason?: 'no-token'): void {
       if (!pendingFetch) return;
-      const targetIds = pendingFetch.wanted.slice(); // 今回取得した対象に限定
+      const targetIds = pendingFetch.wanted.slice();
       const got = pendingFetch.received.size;
       pendingFetch = null;
       hideFetchProgress();
@@ -278,16 +325,27 @@ export default defineContentScript({
         alert(
           '予約データの再取得に必要な認証情報を取得できませんでした。\n一度どれか予約を開く／一覧を再読み込みしてから、もう一度お試しください。',
         );
-      } else if (got === 0 && errors > 0) {
-        // 全件取得失敗（トークン期限切れ等の可能性）。キャッシュがあればそれで続行。
+        return;
+      }
+      if (got === 0 && errors > 0) {
         alert(
-          '最新データの取得に失敗しました（認証の期限切れの可能性）。\n一覧を再読み込みしてから、もう一度お試しください。\n（取得済みのデータがあればそのまま表示します）',
+          '最新データの取得に失敗しました（認証の期限切れの可能性）。\n一覧を再読み込みしてから、もう一度お試しください。',
         );
-      } else if (errors > 0) {
-        // 一部のみ失敗。届いた分は最新、残りはキャッシュ（あれば）で続行。
+        return;
+      }
+      if (errors > 0) {
         console.warn(`[cheriee-karte] 再取得に ${errors} 件失敗しました`);
       }
-      openBatchDialog(targetIds);
+      // カテゴリ＝ペットホテル（マッピングで「ホテル」）のものだけに絞る
+      const hotelIds = targetIds.filter((id) => {
+        const c = cache.get(id);
+        return !!c && mapResponseToKarte(c.data, mapOpts).category === 'ホテル';
+      });
+      if (hotelIds.length === 0) {
+        alert('対象期間にペットホテルの予約が見つかりませんでした。');
+        return;
+      }
+      openBatchDialog(hotelIds);
     }
 
     /* 取得中の進捗オーバーレイ */
@@ -321,12 +379,16 @@ export default defineContentScript({
       updateFetchProgress();
     }
 
-    function updateFetchProgress(): void {
+    function setProgressText(text: string): void {
       const box = document.getElementById(`${PREFIX}-progress-box`);
-      if (!box || !pendingFetch) return;
+      if (box) box.textContent = text;
+    }
+
+    function updateFetchProgress(): void {
+      if (!pendingFetch) return;
       const total = pendingFetch.wanted.length;
       const done = pendingFetch.received.size;
-      box.textContent = `予約データを最新に取得中… ${done} / ${total}`;
+      setProgressText(`予約データを取得中… ${done} / ${total}`);
     }
 
     function hideFetchProgress(): void {
@@ -568,11 +630,8 @@ export default defineContentScript({
         `${PREFIX}-batch`,
       ) as HTMLButtonElement | null;
       if (batch) {
-        const n = allTargetIds().length;
-        batch.textContent = n > 0 ? `🖨 全て印刷 (${n})` : '🖨 全て印刷';
-        batch.disabled = n === 0;
-        batch.style.opacity = n === 0 ? '0.5' : '1';
-        batch.style.cursor = n === 0 ? 'not-allowed' : 'pointer';
+        // 全店舗・ペットホテルで印刷するため、検索結果の件数は出さない
+        batch.textContent = '🖨 全て印刷';
       }
     }
 
