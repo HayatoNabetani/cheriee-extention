@@ -36,9 +36,11 @@ export interface CherieeAnimal {
 }
 
 export interface CherieeCategory {
+  /** カテゴリID（例 本店ペットホテル=43275 / 二子玉ペットホテル=54245） */
+  id?: number;
   /** 例 "PET_HOTEL" / "GROOMING" 等 */
   category?: string;
-  /** 表示名（例 "ペットホテル"） */
+  /** 表示名（例 "本店ペットホテル"） */
   name?: string;
 }
 
@@ -190,6 +192,8 @@ export function isRangeCapturedMessage(
 export interface GatherPrintRequestMessage {
   source: typeof KARTE_MESSAGE_SOURCE;
   type: 'gather-print-request';
+  /** 'today' なら表示中の期間ではなく本日(JST)固定で収集する（カレンダー用） */
+  rangeMode?: 'today';
 }
 
 export function isGatherPrintRequestMessage(

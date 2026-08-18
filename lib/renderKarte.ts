@@ -42,34 +42,34 @@ const KARTE_STYLES = `
     display: flex; align-items: baseline; justify-content: space-between;
     border-bottom: 2px solid #333; padding-bottom: 4px; margin-bottom: 6px;
   }
-  .karte-header h1 { font-size: 18px; margin: 0; }
-  .karte-header .code { font-size: 12px; color: #555; }
+  .karte-header h1 { font-size: 26px; margin: 0; }
+  .karte-header .code { font-size: 15px; color: #555; }
   .canceled-banner {
     background: #ffe0e0; border: 1px solid #c00; color: #900;
-    padding: 4px 8px; margin-bottom: 6px; font-size: 12px; border-radius: 3px;
+    padding: 4px 8px; margin-bottom: 6px; font-size: 15px; border-radius: 3px;
   }
   table.karte-table {
     width: 100%; border-collapse: collapse; margin-bottom: 6px;
-    font-size: 12px; table-layout: fixed;
+    font-size: 16px; table-layout: fixed;
   }
   table.karte-table th, table.karte-table td {
-    border: 1px solid #888; padding: 4px 6px; vertical-align: middle;
+    border: 1px solid #888; padding: 6px 8px; vertical-align: middle;
     word-break: break-all;
   }
   table.karte-table th.label {
-    background: #f2f2f2; width: 22mm; text-align: left; font-weight: 600;
+    background: #f2f2f2; width: 30mm; text-align: left; font-weight: 600;
     white-space: nowrap;
   }
-  .cb { display: inline-block; margin-right: 2px; font-size: 13px; }
+  .cb { display: inline-block; margin-right: 2px; font-size: 17px; }
   .checks span + .cb { margin-left: 10px; }
-  .blank { display: inline-block; min-width: 60px; border-bottom: 1px dotted #aaa; }
-  .blank-line { min-height: 14px; border-bottom: 1px dotted #aaa; }
+  .blank { display: inline-block; min-width: 80px; border-bottom: 1px dotted #aaa; }
+  .blank-line { min-height: 20px; border-bottom: 1px dotted #aaa; }
   .detail-item { padding: 1px 0; }
   .memo-space { min-height: 18mm; }
-  .memo-space .blank-line { min-height: 16px; }
-  .big { font-size: 14px; font-weight: 600; }
-  .muted { color: #666; font-size: 11px; }
-  .note { font-size: 10px; color: #888; margin-top: 4px; }
+  .memo-space .blank-line { min-height: 22px; }
+  .big { font-size: 20px; font-weight: 700; }
+  .muted { color: #666; font-size: 14px; }
+  .note { font-size: 12px; color: #888; margin-top: 4px; }
   @media screen {
     body { background: #ddd; padding: 20px 0; }
     .karte { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.2); margin-bottom: 20px; }

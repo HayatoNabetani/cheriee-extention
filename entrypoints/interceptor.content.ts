@@ -579,14 +579,15 @@ export default defineContentScript({
       );
     }
 
-    async function gatherForPrint(): Promise<void> {
+    async function gatherForPrint(rangeMode?: 'today'): Promise<void> {
       const companyId = lastCompanyId;
       const token = lastAuth;
       if (!companyId || !token) {
         postPrintIds([], 'no-token');
         return;
       }
-      const sel = selectedRange();
+      // 'today'（カレンダーからの印刷）は表示中の期間に関係なく本日(JST)固定。
+      const sel = rangeMode === 'today' ? todayRangeJst() : selectedRange();
       if (!sel) {
         postPrintIds([], 'no-range');
         return;
@@ -594,7 +595,8 @@ export default defineContentScript({
       // 件数表示と同じく、検索条件テンプレート（カテゴリ・日付の絞り込み方など）を
       // 使い、店舗(tenantId)だけ全店舗に差し替える。これで画面の件数と一致する。
       // 最終的なカテゴリ＝ペットホテル絞りは ISOLATED 側が詳細の category で担保。
-      const template = lastSearchBody ?? {};
+      // 'today' は画面の絞り込みを引き継がず、本日の全予約を対象にする。
+      const template = rangeMode === 'today' ? {} : (lastSearchBody ?? {});
       console.info('[cheriee-karte] 印刷 検索テンプレート', template);
       const ids = new Set<string>();
       for (const t of TENANTS) {
@@ -643,7 +645,9 @@ export default defineContentScript({
         return;
       }
       if (isGatherPrintRequestMessage(event.data)) {
-        void gatherForPrint();
+        void gatherForPrint(
+          event.data.rangeMode === 'today' ? 'today' : undefined,
+        );
         return;
       }
     });

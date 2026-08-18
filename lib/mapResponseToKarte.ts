@@ -8,8 +8,10 @@ import type { CherieeScheduleResponse } from './types';
 export interface Karte {
   /** 区分: トリミング / ホテル / その他 */
   category: 'トリミング' | 'ホテル' | 'その他' | '';
-  /** 区分の表示名（category.name） */
+  /** 区分の表示名（category.name。例 "本店ペットホテル"） */
   categoryLabel: string;
+  /** カテゴリID（category.id）。店舗判定のフォールバック用。無ければ null */
+  categoryId: number | null;
   /** 受付者（解決できなければ ID 文字列、無ければ空） */
   staff: string;
   /** 受付日 YYYY/MM/DD (JST) */
@@ -245,6 +247,8 @@ export function mapResponseToKarte(
   return {
     category: mapCategory(res.category?.category),
     categoryLabel: res.category?.name ?? '',
+    categoryId:
+      typeof res.category?.id === 'number' ? res.category.id : null,
     staff,
     receivedDate: formatJstDate(res.createdAt),
     code: res.code ?? '',

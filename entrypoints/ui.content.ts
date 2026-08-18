@@ -37,6 +37,8 @@ export default defineContentScript({
     const PREFIX = 'cheriee-karte';
     const INCLUDE_CONTACT = true; // §6 要確認⑤
     const STAFF_NAMES: Record<number, string> = {}; // §5 要確認②
+    /** 店舗別件数の表示。不要との要望により停止中（true に戻せば復活）。 */
+    const SHOW_COUNTS = false;
 
     // 読み込み確認用（実機での切り分け）。problemなら DevTools コンソールに出る。
     console.info('[cheriee-karte] content script loaded');
@@ -52,6 +54,21 @@ export default defineContentScript({
     /** 「全て印刷」で再取得中の状態。null=非実行。received=今回取り直して届いたID。 */
     let pendingFetch: { wanted: string[]; received: Set<string> } | null = null;
 
+    /** カテゴリID → 店舗表示名（category.name が空だった場合のフォールバック） */
+    const CATEGORY_STORE_LABELS: Record<number, string> = {
+      43275: '本店ペットホテル',
+      54245: '二子玉ペットホテル',
+    };
+
+    /** どの店舗のホテル予約か。category.name を優先し、無ければ category.id で判定 */
+    function storeLabelOf(karte: Karte): string {
+      if (karte.categoryLabel) return karte.categoryLabel;
+      if (karte.categoryId != null) {
+        return CATEGORY_STORE_LABELS[karte.categoryId] ?? '';
+      }
+      return '';
+    }
+
     /** 店舗別件数グループ（本日／選択日）。null=未取得。 */
     let todayCounts: CountGroup[] | null = null;
     let countsTimer: number | null = null;
@@ -60,6 +77,7 @@ export default defineContentScript({
 
     /** MAIN に店舗別件数を依頼（バースト/連続発火をデバウンスして最新の期間で1回） */
     function requestTodayCounts(): void {
+      if (!SHOW_COUNTS) return;
       if (countsTimer != null) clearTimeout(countsTimer);
       countsTimer = window.setTimeout(() => {
         countsTimer = null;
@@ -254,14 +272,19 @@ export default defineContentScript({
      */
     let gathering = false;
 
-    function startPrintAll(): void {
+    function startPrintAll(rangeMode?: 'today'): void {
       if (pendingFetch || gathering) return;
       gathering = true;
       showFetchProgress();
-      setProgressText('印刷対象を集計中…（全店舗・ペットホテル）');
+      setProgressText(
+        rangeMode === 'today'
+          ? '印刷対象を集計中…（全店舗・ペットホテル・本日）'
+          : '印刷対象を集計中…（全店舗・ペットホテル）',
+      );
       const req: GatherPrintRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
         type: 'gather-print-request',
+        ...(rangeMode ? { rangeMode } : {}),
       };
       window.postMessage(req, window.location.origin);
       window.setTimeout(() => {
@@ -425,7 +448,7 @@ export default defineContentScript({
       const panel = document.createElement('div');
       Object.assign(panel.style, {
         background: '#fff',
-        width: 'min(560px, 92vw)',
+        width: 'min(760px, 94vw)',
         maxHeight: '82vh',
         borderRadius: '10px',
         boxShadow: '0 8px 30px rgba(0,0,0,.35)',
@@ -453,17 +476,65 @@ export default defineContentScript({
       } satisfies Partial<CSSStyleDeclaration>);
 
       const checkboxes: HTMLInputElement[] = [];
-      // 今回の対象IDのみ（cache 全体ではない）。期間でソートして並べる。
+      // 今回の対象IDのみ（cache 全体ではない）。店舗→期間でソートして並べる。
       const entries = ids
         .map((id) => {
           const captured = cache.get(id)!;
-          return { id, karte: mapResponseToKarte(captured.data, mapOpts) };
+          const karte = mapResponseToKarte(captured.data, mapOpts);
+          return { id, karte, store: storeLabelOf(karte) };
         })
-        .sort((a, b) =>
-          (a.karte.period || '').localeCompare(b.karte.period || ''),
+        .sort(
+          (a, b) =>
+            a.store.localeCompare(b.store) ||
+            (a.karte.period || '').localeCompare(b.karte.period || ''),
         );
 
-      for (const { id, karte } of entries) {
+      // 見出しに店舗別の内訳を出す（例「本店ペットホテル 5件・二子玉ペットホテル 3件」）
+      const storeCounts = new Map<string, number>();
+      for (const e of entries) {
+        if (e.store) storeCounts.set(e.store, (storeCounts.get(e.store) ?? 0) + 1);
+      }
+      if (storeCounts.size > 0) {
+        const breakdown = [...storeCounts.entries()]
+          .map(([name, n]) => `${name} ${n}件`)
+          .join('・');
+        const sub = document.createElement('div');
+        sub.textContent = breakdown;
+        Object.assign(sub.style, {
+          fontSize: '12px',
+          fontWeight: '400',
+          color: '#666',
+          marginTop: '2px',
+        } satisfies Partial<CSSStyleDeclaration>);
+        header.appendChild(sub);
+      }
+
+      // キャンセル系が含まれる場合は「除外している」旨の注意書きを出す
+      const canceledCount = entries.filter((e) => e.karte.canceled).length;
+      let notice: HTMLElement | null = null;
+      if (canceledCount > 0) {
+        notice = document.createElement('div');
+        notice.textContent =
+          `⚠ キャンセルになっている予約 ${canceledCount}件は選択から除外しています。` +
+          '印刷したい場合は手動でチェックしてください。';
+        Object.assign(notice.style, {
+          padding: '8px 18px',
+          fontSize: '12px',
+          color: '#8a5a00',
+          background: '#fff7e6',
+          borderBottom: '1px solid #f0e0c0',
+        } satisfies Partial<CSSStyleDeclaration>);
+      }
+
+      /** 店舗バッジの色（本店=濃紫 / 二子玉=薄紫 / 不明=グレー） */
+      const storeBadgeColor = (store: string): string =>
+        store.includes('二子玉')
+          ? 'rgb(239, 141, 252)'
+          : store.includes('本店')
+            ? 'rgb(220, 74, 240)'
+            : '#6b7280';
+
+      for (const { id, karte, store } of entries) {
         const row = document.createElement('label');
         Object.assign(row.style, {
           display: 'flex',
@@ -477,8 +548,11 @@ export default defineContentScript({
 
         const cb = document.createElement('input');
         cb.type = 'checkbox';
-        cb.checked = true;
+        // キャンセル系は手動でチェックした時のみ印刷対象（初期選択・一括選択の対象外）
+        cb.checked = !karte.canceled;
         cb.dataset.id = id;
+        cb.dataset.store = store; // 店舗別の一括選択で使う
+        if (karte.canceled) cb.dataset.canceled = '1';
         checkboxes.push(cb);
 
         const text = document.createElement('div');
@@ -490,6 +564,22 @@ export default defineContentScript({
           `${karte.breed ? `（${karte.breed}）` : ''}` +
           `${karte.canceled ? ' ⚠キャンセル' : ''}`;
         title.style.fontWeight = '600';
+        if (store) {
+          const badge = document.createElement('span');
+          badge.textContent = store;
+          Object.assign(badge.style, {
+            display: 'inline-block',
+            padding: '1px 8px',
+            marginRight: '8px',
+            borderRadius: '999px',
+            fontSize: '11px',
+            fontWeight: '700',
+            color: '#fff',
+            background: storeBadgeColor(store),
+            verticalAlign: 'middle',
+          } satisfies Partial<CSSStyleDeclaration>);
+          title.prepend(badge);
+        }
         const sub = document.createElement('div');
         sub.textContent =
           `${karte.period || '期間不明'}　${karte.code ? `予約番号 ${karte.code}` : ''}`;
@@ -504,6 +594,7 @@ export default defineContentScript({
       Object.assign(footer.style, {
         display: 'flex',
         alignItems: 'center',
+        flexWrap: 'wrap',
         gap: '8px',
         padding: '12px 18px',
         borderTop: '1px solid #eee',
@@ -528,6 +619,21 @@ export default defineContentScript({
 
       const selectAll = mkBtn('全選択');
       const deselectAll = mkBtn('全解除');
+      const selectHonten = mkBtn('本店だけ選択');
+      const selectFutako = mkBtn('二子玉だけ選択');
+      // 店舗バッジと同じ色で塗って対応が分かるようにする
+      Object.assign(selectHonten.style, {
+        background: 'rgb(220, 74, 240)',
+        borderColor: 'rgb(220, 74, 240)',
+        color: '#fff',
+        fontWeight: '600',
+      } satisfies Partial<CSSStyleDeclaration>);
+      Object.assign(selectFutako.style, {
+        background: 'rgb(239, 141, 252)',
+        borderColor: 'rgb(239, 141, 252)',
+        color: '#fff',
+        fontWeight: '600',
+      } satisfies Partial<CSSStyleDeclaration>);
       const spacer = document.createElement('div');
       spacer.style.flex = '1';
       const cancelBtn = mkBtn('キャンセル');
@@ -539,15 +645,28 @@ export default defineContentScript({
         printBtn.disabled = n === 0;
         printBtn.style.opacity = n === 0 ? '0.5' : '1';
       };
+      /** 一括選択でキャンセル系を除外する判定 */
+      const isCanceledCb = (c: HTMLInputElement) => c.dataset.canceled === '1';
       checkboxes.forEach((c) => c.addEventListener('change', updatePrintLabel));
       selectAll.addEventListener('click', () => {
-        checkboxes.forEach((c) => (c.checked = true));
+        checkboxes.forEach((c) => (c.checked = !isCanceledCb(c)));
         updatePrintLabel();
       });
       deselectAll.addEventListener('click', () => {
         checkboxes.forEach((c) => (c.checked = false));
         updatePrintLabel();
       });
+      /** 指定した店舗名を含む予約だけをチェック状態にする（キャンセル系は除く） */
+      const selectOnlyStore = (match: string) => {
+        checkboxes.forEach(
+          (c) =>
+            (c.checked =
+              !isCanceledCb(c) && (c.dataset.store ?? '').includes(match)),
+        );
+        updatePrintLabel();
+      };
+      selectHonten.addEventListener('click', () => selectOnlyStore('本店'));
+      selectFutako.addEventListener('click', () => selectOnlyStore('二子玉'));
 
       const close = () => overlay.remove();
       cancelBtn.addEventListener('click', close);
@@ -560,8 +679,16 @@ export default defineContentScript({
         printBatch(ids);
       });
 
-      footer.append(selectAll, deselectAll, spacer, cancelBtn, printBtn);
-      panel.append(header, list, footer);
+      footer.append(
+        selectAll,
+        deselectAll,
+        selectHonten,
+        selectFutako,
+        spacer,
+        cancelBtn,
+        printBtn,
+      );
+      panel.append(header, ...(notice ? [notice] : []), list, footer);
       overlay.appendChild(panel);
       document.body.appendChild(overlay);
       updatePrintLabel();
@@ -603,7 +730,10 @@ export default defineContentScript({
       batchBtn.textContent = '🖨 ホテル予約印刷';
       batchBtn.title = '一覧の全予約をまとめて印刷します（未取得分は自動取得）';
       style(batchBtn, false);
-      batchBtn.addEventListener('click', startPrintAll);
+      // カレンダー上では表示中の期間に関係なく「本日」のホテル予約を印刷する
+      batchBtn.addEventListener('click', () =>
+        startPrintAll(pageMode() === 'calendar' ? 'today' : undefined),
+      );
 
       const singleBtn = document.createElement('button');
       singleBtn.id = `${PREFIX}-single`;
@@ -633,7 +763,10 @@ export default defineContentScript({
       ) as HTMLButtonElement | null;
       if (batch) {
         // 全店舗・ペットホテルで印刷するため、検索結果の件数は出さない
-        batch.textContent = '🖨 ホテル予約印刷';
+        batch.textContent =
+          pageMode() === 'calendar'
+            ? '🖨 ホテル予約印刷（本日）'
+            : '🖨 ホテル予約印刷';
       }
     }
 
@@ -679,9 +812,9 @@ export default defineContentScript({
 
     /**
      * 現在ページの種別。
-     *  - 'search'  : /schedules/search → 「全て印刷」＋店舗別件数
-     *  - 'calendar': /schedules/calendar/... → 店舗別件数のみ（印刷ボタンなし）
-     *  - 'detail'  : /schedules/{数値id} → 「印刷」(単票)
+     *  - 'search'  : /schedules/search → 「ホテル予約印刷」（表示中の期間）
+     *  - 'calendar': /schedules/calendar/... → 「ホテル予約印刷（本日）」（本日固定）
+     *  - 'detail'  : /schedules/{数値id} → 「カルテ印刷」(単票)
      *  - 'other'   : それ以外 → 何も出さない
      */
     function pageMode(): 'search' | 'calendar' | 'detail' | 'other' {
@@ -726,7 +859,11 @@ export default defineContentScript({
     function renderTodayCounts(): void {
       const existing = document.getElementById(`${PREFIX}-counts`);
       const mode = pageMode();
-      if ((mode !== 'search' && mode !== 'calendar') || !todayCounts) {
+      if (
+        !SHOW_COUNTS ||
+        (mode !== 'search' && mode !== 'calendar') ||
+        !todayCounts
+      ) {
         existing?.remove();
         return;
       }
@@ -800,20 +937,24 @@ export default defineContentScript({
       });
     }
 
-    /** ツールバーへ注入した種別（フローティング表示判断に使う） */
-    interface ToolbarState {
-      all: boolean;
-      single: boolean;
-    }
+    /** ツールバーへ注入したボタン種別（フローティング表示判断に使う）。null=未注入 */
+    type ToolbarCtx = 'all' | 'all-today' | 'single' | null;
 
-    function tryInjectToolbar(): ToolbarState {
+    function tryInjectToolbar(): ToolbarCtx {
       const mode = pageMode();
-      // 出すべきボタンの種別（search→all / detail→single / other→なし）
-      const wantCtx: 'all' | 'single' | null =
-        mode === 'search' ? 'all' : mode === 'detail' ? 'single' : null;
+      // 出すべきボタンの種別
+      // （search→all / calendar→all-today / detail→single / other→なし）
+      const wantCtx: ToolbarCtx =
+        mode === 'search'
+          ? 'all'
+          : mode === 'calendar'
+            ? 'all-today'
+            : mode === 'detail'
+              ? 'single'
+              : null;
 
       const row = findHeadingRow();
-      if (!row) return { all: false, single: false };
+      if (!row) return null;
 
       const existing = row.querySelector<HTMLElement>(`.${TB_MARK}`);
       // 種別が変わった/不要になったら撤去（SPA遷移でページ種別が変わるため）
@@ -822,35 +963,41 @@ export default defineContentScript({
       if (wantCtx && !row.querySelector(`.${TB_MARK}`)) {
         const el =
           wantCtx === 'all'
-            ? makeNativeButton('ホテル予約印刷', 'fa-print', startPrintAll)
-            : makeNativeButton('カルテ印刷', 'fa-print', printSingle);
+            ? makeNativeButton('ホテル予約印刷', 'fa-print', () =>
+                startPrintAll(),
+              )
+            : wantCtx === 'all-today'
+              ? makeNativeButton('ホテル予約印刷（本日）', 'fa-print', () =>
+                  startPrintAll('today'),
+                )
+              : makeNativeButton('カルテ印刷', 'fa-print', printSingle);
         el.dataset.ctx = wantCtx;
         row.appendChild(el);
         console.info('[cheriee-karte] ツールバーに印刷ボタンを注入しました', wantCtx);
       }
 
       const cur = row.querySelector<HTMLElement>(`.${TB_MARK}`);
-      return {
-        all: cur?.dataset.ctx === 'all',
-        single: cur?.dataset.ctx === 'single',
-      };
+      return (cur?.dataset.ctx as ToolbarCtx) ?? null;
     }
 
     /**
      * フローティングはフォールバック。ページ種別に合うボタンだけ、かつ
-     * ツールバーに出せなかった時のみ表示する（全て印刷は search のみ）。
+     * ツールバーに出せなかった時のみ表示する（一括印刷は search/calendar）。
      */
-    function syncFloating(injected: ToolbarState): void {
+    function syncFloating(injected: ToolbarCtx): void {
       const mode = pageMode();
       const batch = document.getElementById(`${PREFIX}-batch`);
       const single = document.getElementById(`${PREFIX}-single`);
       if (batch) {
+        const wantBatch = mode === 'search' || mode === 'calendar';
         batch.style.display =
-          mode === 'search' && !injected.all ? '' : 'none';
+          wantBatch && injected !== 'all' && injected !== 'all-today'
+            ? ''
+            : 'none';
       }
       if (single) {
         single.style.display =
-          mode === 'detail' && !injected.single ? '' : 'none';
+          mode === 'detail' && injected !== 'single' ? '' : 'none';
       }
       const fab = document.getElementById(`${PREFIX}-fab`);
       if (fab) {
