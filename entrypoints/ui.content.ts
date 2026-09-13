@@ -14,6 +14,7 @@ import {
 } from '@/lib/types';
 import { mapResponseToKarte, type Karte } from '@/lib/mapResponseToKarte';
 import { renderKarte, renderKartes } from '@/lib/renderKarte';
+import { renderReservationTable } from '@/lib/renderReservationTable';
 
 /**
  * ISOLATEDワールド。interceptor(MAIN) が横取りしたレスポンスを受信してキャッシュし、
@@ -57,6 +58,8 @@ export default defineContentScript({
       received: Set<string>;
       /** 指定時は、このJST日付にチェックインする予約だけを印刷対象にする。 */
       targetStartDate?: string;
+      targetMonth?: string;
+      output: 'karte' | 'reservation-table';
     } | null = null;
 
     /** カテゴリID → 店舗表示名（category.name が空だった場合のフォールバック） */
@@ -152,7 +155,13 @@ export default defineContentScript({
         return;
       }
       if (isPrintIdsMessage(data)) {
-        onPrintIdsGathered(data.ids, data.reason, data.targetStartDate);
+        onPrintIdsGathered(
+          data.ids,
+          data.reason,
+          data.targetStartDate,
+          data.targetMonth,
+          data.output,
+        );
         return;
       }
       if (isFetchDoneMessage(data)) {
@@ -289,6 +298,7 @@ export default defineContentScript({
       const req: GatherPrintRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
         type: 'gather-print-request',
+        output: 'karte',
         ...(targetDate ? { targetDate } : {}),
       };
       window.postMessage(req, window.location.origin);
@@ -297,6 +307,29 @@ export default defineContentScript({
           gathering = false;
           hideFetchProgress();
           alert('印刷対象の集計がタイムアウトしました。もう一度お試しください。');
+        }
+      }, 30_000);
+    }
+
+    function startReservationTable(targetMonth: string): void {
+      if (pendingFetch || gathering) return;
+      gathering = true;
+      showFetchProgress();
+      setProgressText(
+        `予約表を集計中…（全店舗・ペットホテル・${targetMonth}）`,
+      );
+      const req: GatherPrintRequestMessage = {
+        source: KARTE_MESSAGE_SOURCE,
+        type: 'gather-print-request',
+        output: 'reservation-table',
+        targetMonth,
+      };
+      window.postMessage(req, window.location.origin);
+      window.setTimeout(() => {
+        if (gathering) {
+          gathering = false;
+          hideFetchProgress();
+          alert('予約表の集計がタイムアウトしました。もう一度お試しください。');
         }
       }, 30_000);
     }
@@ -406,11 +439,117 @@ export default defineContentScript({
       input.focus();
     }
 
+    /** 月間の「ホテル予約表と送迎」を作る対象月選択。 */
+    function openReservationMonthDialog(): void {
+      document.getElementById(`${PREFIX}-month-dialog`)?.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = `${PREFIX}-month-dialog`;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: '0',
+        background: 'rgba(0,0,0,.4)',
+        zIndex: '2147483647',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const form = document.createElement('form');
+      Object.assign(form.style, {
+        width: 'min(360px, 90vw)',
+        padding: '20px',
+        borderRadius: '10px',
+        background: '#fff',
+        boxShadow: '0 8px 30px rgba(0,0,0,.35)',
+        fontFamily: '"Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo",sans-serif',
+        color: '#111',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const title = document.createElement('div');
+      title.textContent = '予約表の対象月を選択';
+      Object.assign(title.style, { fontSize: '16px', fontWeight: '700' });
+
+      const note = document.createElement('div');
+      note.textContent = '選択した月にチェックインするホテル予約を一覧印刷します。';
+      Object.assign(note.style, {
+        marginTop: '6px',
+        color: '#666',
+        fontSize: '12px',
+      });
+
+      const input = document.createElement('input');
+      input.type = 'month';
+      input.required = true;
+      input.value = (jstDateOf(new Date().toISOString()) ?? '').slice(0, 7);
+      Object.assign(input.style, {
+        display: 'block',
+        width: '100%',
+        boxSizing: 'border-box',
+        marginTop: '16px',
+        padding: '9px 10px',
+        border: '1px solid #ccc',
+        borderRadius: '6px',
+        fontSize: '15px',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const actions = document.createElement('div');
+      Object.assign(actions.style, {
+        display: 'flex',
+        justifyContent: 'flex-end',
+        gap: '8px',
+        marginTop: '18px',
+      } satisfies Partial<CSSStyleDeclaration>);
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'キャンセル';
+      const submit = document.createElement('button');
+      submit.type = 'submit';
+      submit.textContent = '予約表を作成';
+      for (const button of [cancel, submit]) {
+        Object.assign(button.style, {
+          padding: '8px 14px',
+          border: '1px solid #ccc',
+          borderRadius: '6px',
+          background: '#fff',
+          cursor: 'pointer',
+          fontSize: '13px',
+        } satisfies Partial<CSSStyleDeclaration>);
+      }
+      Object.assign(submit.style, {
+        borderColor: '#6d28d9',
+        background: '#6d28d9',
+        color: '#fff',
+        fontWeight: '600',
+      });
+
+      const close = () => overlay.remove();
+      cancel.addEventListener('click', close);
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) close();
+      });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (!input.value) return;
+        const selectedMonth = input.value;
+        close();
+        startReservationTable(selectedMonth);
+      });
+
+      actions.append(cancel, submit);
+      form.append(title, note, input, actions);
+      overlay.appendChild(form);
+      document.body.appendChild(overlay);
+      input.focus();
+    }
+
     /** MAIN から全店舗・期間のIDが返ってきた → 詳細取得を開始 */
     function onPrintIdsGathered(
       ids: string[],
       reason?: 'no-token' | 'no-range',
       targetStartDate?: string,
+      targetMonth?: string,
+      output: 'karte' | 'reservation-table' = 'karte',
     ): void {
       if (!gathering) return;
       gathering = false;
@@ -433,7 +572,13 @@ export default defineContentScript({
         alert('対象期間の予約が見つかりませんでした。');
         return;
       }
-      pendingFetch = { wanted: ids, received: new Set(), targetStartDate };
+      pendingFetch = {
+        wanted: ids,
+        received: new Set(),
+        targetStartDate,
+        targetMonth,
+        output,
+      };
       updateFetchProgress();
       const req: FetchRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
@@ -453,6 +598,8 @@ export default defineContentScript({
       if (!pendingFetch) return;
       const targetIds = pendingFetch.wanted.slice();
       const targetStartDate = pendingFetch.targetStartDate;
+      const targetMonth = pendingFetch.targetMonth;
+      const output = pendingFetch.output;
       const got = pendingFetch.received.size;
       pendingFetch = null;
       hideFetchProgress();
@@ -476,18 +623,36 @@ export default defineContentScript({
       // JST日付が指定日と一致する予約（＝指定日チェックイン）だけを残す。
       const hotelIds = targetIds.filter((id) => {
         const c = cache.get(id);
+        const karte = c ? mapResponseToKarte(c.data, mapOpts) : null;
         return (
           !!c &&
-          mapResponseToKarte(c.data, mapOpts).category === 'ホテル' &&
-          (!targetStartDate || jstDateOf(c.data.startedAt) === targetStartDate)
+          karte?.category === 'ホテル' &&
+          (output !== 'reservation-table' || !karte.canceled) &&
+          (!targetStartDate || jstDateOf(c.data.startedAt) === targetStartDate) &&
+          (!targetMonth || jstDateOf(c.data.startedAt)?.startsWith(targetMonth))
         );
       });
       if (hotelIds.length === 0) {
         alert(
           targetStartDate
-            ? '本日チェックインのペットホテル予約が見つかりませんでした。'
+            ? '指定日にチェックインするペットホテル予約が見つかりませんでした。'
+            : targetMonth
+              ? '対象月にチェックインするペットホテル予約が見つかりませんでした。'
             : '対象期間にペットホテルの予約が見つかりませんでした。',
         );
+        return;
+      }
+      if (output === 'reservation-table' && targetMonth) {
+        const entries = hotelIds.map((id) => {
+          const captured = cache.get(id)!;
+          const karte = mapResponseToKarte(captured.data, mapOpts);
+          return {
+            schedule: captured.data,
+            store: storeLabelOf(karte),
+            categoryId: karte.categoryId,
+          };
+        });
+        printHtml(renderReservationTable(targetMonth, entries));
         return;
       }
       openBatchDialog(hotelIds);
@@ -873,6 +1038,18 @@ export default defineContentScript({
         else startPrintAll();
       });
 
+      const tableBtn = document.createElement('button');
+      tableBtn.id = `${PREFIX}-reservation-table`;
+      tableBtn.type = 'button';
+      tableBtn.textContent = '🗓 予約表印刷';
+      tableBtn.title = '月間のホテル予約表（IN・OUT・送迎・備考）を印刷します';
+      style(tableBtn, false);
+      Object.assign(tableBtn.style, {
+        color: '#6d28d9',
+        borderColor: '#6d28d9',
+      });
+      tableBtn.addEventListener('click', openReservationMonthDialog);
+
       const singleBtn = document.createElement('button');
       singleBtn.id = `${PREFIX}-single`;
       singleBtn.type = 'button';
@@ -881,7 +1058,7 @@ export default defineContentScript({
       style(singleBtn, true);
       singleBtn.addEventListener('click', printSingle);
 
-      container.append(batchBtn, singleBtn);
+      container.append(tableBtn, batchBtn, singleBtn);
       document.body.appendChild(container);
       updateButtons();
     }
@@ -1094,23 +1271,36 @@ export default defineContentScript({
       const row = findHeadingRow();
       if (!row) return null;
 
-      const existing = row.querySelector<HTMLElement>(`.${TB_MARK}`);
+      const existing = Array.from(
+        row.querySelectorAll<HTMLElement>(`.${TB_MARK}`),
+      );
       // 種別が変わった/不要になったら撤去（SPA遷移でページ種別が変わるため）
-      if (existing && existing.dataset.ctx !== wantCtx) existing.remove();
+      if (existing.some((el) => el.dataset.ctx !== wantCtx)) {
+        existing.forEach((el) => el.remove());
+      }
 
       if (wantCtx && !row.querySelector(`.${TB_MARK}`)) {
-        const el =
+        const elements =
           wantCtx === 'all'
-            ? makeNativeButton('ホテル予約印刷', 'fa-print', () =>
-                startPrintAll(),
-              )
+            ? [
+                makeNativeButton('ホテル予約印刷', 'fa-print', () =>
+                  startPrintAll(),
+                ),
+              ]
             : wantCtx === 'all-date'
-              ? makeNativeButton('ホテル予約印刷（日付指定）', 'fa-print', () =>
-                  openPrintDateDialog(),
-                )
-              : makeNativeButton('カルテ印刷', 'fa-print', printSingle);
-        el.dataset.ctx = wantCtx;
-        row.appendChild(el);
+              ? [
+                  makeNativeButton('ホテル予約印刷（日付指定）', 'fa-print', () =>
+                    openPrintDateDialog(),
+                  ),
+                  makeNativeButton('予約表印刷', 'fa-calendar-days', () =>
+                    openReservationMonthDialog(),
+                  ),
+                ]
+              : [makeNativeButton('カルテ印刷', 'fa-print', printSingle)];
+        elements.forEach((el) => {
+          el.dataset.ctx = wantCtx;
+          row.appendChild(el);
+        });
         console.info('[cheriee-karte] ツールバーに印刷ボタンを注入しました', wantCtx);
       }
 
@@ -1125,6 +1315,7 @@ export default defineContentScript({
     function syncFloating(injected: ToolbarCtx): void {
       const mode = pageMode();
       const batch = document.getElementById(`${PREFIX}-batch`);
+      const table = document.getElementById(`${PREFIX}-reservation-table`);
       const single = document.getElementById(`${PREFIX}-single`);
       if (batch) {
         const wantBatch = mode === 'search' || mode === 'calendar';
@@ -1132,6 +1323,10 @@ export default defineContentScript({
           wantBatch && injected !== 'all' && injected !== 'all-date'
             ? ''
             : 'none';
+      }
+      if (table) {
+        table.style.display =
+          mode === 'calendar' && injected !== 'all-date' ? '' : 'none';
       }
       if (single) {
         single.style.display =
@@ -1141,6 +1336,7 @@ export default defineContentScript({
       if (fab) {
         const anyVisible =
           (batch && batch.style.display !== 'none') ||
+          (table && table.style.display !== 'none') ||
           (single && single.style.display !== 'none');
         fab.style.display = anyVisible ? 'flex' : 'none';
       }
@@ -1156,7 +1352,9 @@ export default defineContentScript({
      *   2) rAF でデバウンスし、1フレーム1回に集約する
      */
     // 自分が挿入した要素（カウント表示・フローティング・ダイアログ）内の変化は無視。
-    const ownSelector = `#${PREFIX}-fab, #${PREFIX}-dialog, #${PREFIX}-progress, #${PREFIX}-counts`;
+    const ownSelector =
+      `#${PREFIX}-fab, #${PREFIX}-dialog, #${PREFIX}-date-dialog, ` +
+      `#${PREFIX}-month-dialog, #${PREFIX}-progress, #${PREFIX}-counts`;
 
     function isOwnMutation(record: MutationRecord): boolean {
       const t = record.target;

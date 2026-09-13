@@ -194,6 +194,9 @@ export interface GatherPrintRequestMessage {
   type: 'gather-print-request';
   /** 指定時は表示中の期間ではなく、このJST日付のチェックイン予約を収集する。 */
   targetDate?: string;
+  /** 指定時は、この月にチェックインする予約表用データを収集する。 */
+  targetMonth?: string;
+  output?: 'karte' | 'reservation-table';
 }
 
 export function isGatherPrintRequestMessage(
@@ -214,6 +217,9 @@ export interface PrintIdsMessage {
   reason?: 'no-token' | 'no-range';
   /** 対象にするチェックイン日（JST, YYYY-MM-DD） */
   targetStartDate?: string;
+  /** 予約表の対象月（JST, YYYY-MM） */
+  targetMonth?: string;
+  output?: 'karte' | 'reservation-table';
 }
 
 export function isPrintIdsMessage(

@@ -450,6 +450,16 @@ export default defineContentScript({
       };
     }
 
+    /** 指定したJST月の初日〜末日を返す。 */
+    function monthRangeJst(month: string): { start: string; end: string } {
+      const [year, monthNumber] = month.split('-').map(Number);
+      const lastDay = new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
+      return {
+        start: `${month}-01T00:00:00+09:00`,
+        end: `${month}-${String(lastDay).padStart(2, '0')}T23:59:59+09:00`,
+      };
+    }
+
     type TenantCount = { name: string; count: number | null };
     type CountGroup = { label: string; results: TenantCount[] };
 
@@ -584,6 +594,8 @@ export default defineContentScript({
       ids: string[],
       reason?: 'no-token' | 'no-range',
       targetStartDate?: string,
+      targetMonth?: string,
+      output?: 'karte' | 'reservation-table',
     ): void {
       window.postMessage(
         {
@@ -592,12 +604,18 @@ export default defineContentScript({
           ids,
           reason,
           targetStartDate,
+          targetMonth,
+          output,
         },
         ORIGIN,
       );
     }
 
-    async function gatherForPrint(targetDate?: string): Promise<void> {
+    async function gatherForPrint(
+      targetDate?: string,
+      targetMonth?: string,
+      output: 'karte' | 'reservation-table' = 'karte',
+    ): Promise<void> {
       const companyId = lastCompanyId;
       const token = lastAuth;
       if (!companyId || !token) {
@@ -609,7 +627,15 @@ export default defineContentScript({
         typeof targetDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(targetDate)
           ? targetDate
           : undefined;
-      const sel = requestedDate ? dateRangeJst(requestedDate) : selectedRange();
+      const requestedMonth =
+        typeof targetMonth === 'string' && /^\d{4}-\d{2}$/.test(targetMonth)
+          ? targetMonth
+          : undefined;
+      const sel = requestedDate
+        ? dateRangeJst(requestedDate)
+        : requestedMonth
+          ? monthRangeJst(requestedMonth)
+          : selectedRange();
       if (!sel) {
         postPrintIds([], 'no-range');
         return;
@@ -618,7 +644,8 @@ export default defineContentScript({
       // 使い、店舗(tenantId)だけ全店舗に差し替える。これで画面の件数と一致する。
       // 最終的なカテゴリ＝ペットホテル絞りは ISOLATED 側が詳細の category で担保。
       // 日付指定時は画面の絞り込みを引き継がず、その日の全予約を対象にする。
-      const template = requestedDate ? {} : (lastSearchBody ?? {});
+      const template =
+        requestedDate || requestedMonth ? {} : (lastSearchBody ?? {});
       console.info('[cheriee-karte] 印刷 検索テンプレート', template);
       const ids = new Set<string>();
       for (const t of TENANTS) {
@@ -655,7 +682,13 @@ export default defineContentScript({
       );
       // 検索APIは指定日に滞在中の予約も返すため、日付指定時は UI 側で
       // startedAt（チェックイン日）を照合できるよう対象日も渡す。
-      postPrintIds([...ids], undefined, requestedDate);
+      postPrintIds(
+        [...ids],
+        undefined,
+        requestedDate,
+        requestedMonth,
+        output,
+      );
     }
 
     window.addEventListener('message', (event) => {
@@ -669,7 +702,13 @@ export default defineContentScript({
         return;
       }
       if (isGatherPrintRequestMessage(event.data)) {
-        void gatherForPrint(event.data.targetDate);
+        void gatherForPrint(
+          event.data.targetDate,
+          event.data.targetMonth,
+          event.data.output === 'reservation-table'
+            ? 'reservation-table'
+            : 'karte',
+        );
         return;
       }
     });
