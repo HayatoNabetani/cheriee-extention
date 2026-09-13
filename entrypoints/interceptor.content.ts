@@ -442,6 +442,14 @@ export default defineContentScript({
       };
     }
 
+    /** 指定したJST日付の 00:00:00〜23:59:59 を返す。 */
+    function dateRangeJst(date: string): { start: string; end: string } {
+      return {
+        start: `${date}T00:00:00+09:00`,
+        end: `${date}T23:59:59+09:00`,
+      };
+    }
+
     type TenantCount = { name: string; count: number | null };
     type CountGroup = { label: string; results: TenantCount[] };
 
@@ -572,22 +580,36 @@ export default defineContentScript({
     /* ───────── 「全て印刷」用: 全店舗・対象期間の予約IDを集める ─────────
      * 現在の絞り込みは使わず、表示中の期間で全店舗を検索する。カテゴリの
      * ペットホテル絞り込みは ISOLATED 側が詳細の category で判定する。 */
-    function postPrintIds(ids: string[], reason?: 'no-token' | 'no-range'): void {
+    function postPrintIds(
+      ids: string[],
+      reason?: 'no-token' | 'no-range',
+      targetStartDate?: string,
+    ): void {
       window.postMessage(
-        { source: KARTE_MESSAGE_SOURCE, type: 'print-ids', ids, reason },
+        {
+          source: KARTE_MESSAGE_SOURCE,
+          type: 'print-ids',
+          ids,
+          reason,
+          targetStartDate,
+        },
         ORIGIN,
       );
     }
 
-    async function gatherForPrint(rangeMode?: 'today'): Promise<void> {
+    async function gatherForPrint(targetDate?: string): Promise<void> {
       const companyId = lastCompanyId;
       const token = lastAuth;
       if (!companyId || !token) {
         postPrintIds([], 'no-token');
         return;
       }
-      // 'today'（カレンダーからの印刷）は表示中の期間に関係なく本日(JST)固定。
-      const sel = rangeMode === 'today' ? todayRangeJst() : selectedRange();
+      // カレンダーから日付指定された場合は、表示中の期間に関係なくその日で検索する。
+      const requestedDate =
+        typeof targetDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(targetDate)
+          ? targetDate
+          : undefined;
+      const sel = requestedDate ? dateRangeJst(requestedDate) : selectedRange();
       if (!sel) {
         postPrintIds([], 'no-range');
         return;
@@ -595,8 +617,8 @@ export default defineContentScript({
       // 件数表示と同じく、検索条件テンプレート（カテゴリ・日付の絞り込み方など）を
       // 使い、店舗(tenantId)だけ全店舗に差し替える。これで画面の件数と一致する。
       // 最終的なカテゴリ＝ペットホテル絞りは ISOLATED 側が詳細の category で担保。
-      // 'today' は画面の絞り込みを引き継がず、本日の全予約を対象にする。
-      const template = rangeMode === 'today' ? {} : (lastSearchBody ?? {});
+      // 日付指定時は画面の絞り込みを引き継がず、その日の全予約を対象にする。
+      const template = requestedDate ? {} : (lastSearchBody ?? {});
       console.info('[cheriee-karte] 印刷 検索テンプレート', template);
       const ids = new Set<string>();
       for (const t of TENANTS) {
@@ -631,7 +653,9 @@ export default defineContentScript({
       console.info(
         `[cheriee-karte] 印刷対象収集: 全${TENANTS.length}店舗 ${ids.size}件（期間 ${sel.start}..${sel.end}）`,
       );
-      postPrintIds([...ids]);
+      // 検索APIは指定日に滞在中の予約も返すため、日付指定時は UI 側で
+      // startedAt（チェックイン日）を照合できるよう対象日も渡す。
+      postPrintIds([...ids], undefined, requestedDate);
     }
 
     window.addEventListener('message', (event) => {
@@ -645,9 +669,7 @@ export default defineContentScript({
         return;
       }
       if (isGatherPrintRequestMessage(event.data)) {
-        void gatherForPrint(
-          event.data.rangeMode === 'today' ? 'today' : undefined,
-        );
+        void gatherForPrint(event.data.targetDate);
         return;
       }
     });

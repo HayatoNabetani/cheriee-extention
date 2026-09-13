@@ -192,8 +192,8 @@ export function isRangeCapturedMessage(
 export interface GatherPrintRequestMessage {
   source: typeof KARTE_MESSAGE_SOURCE;
   type: 'gather-print-request';
-  /** 'today' なら表示中の期間ではなく本日(JST)固定で収集する（カレンダー用） */
-  rangeMode?: 'today';
+  /** 指定時は表示中の期間ではなく、このJST日付のチェックイン予約を収集する。 */
+  targetDate?: string;
 }
 
 export function isGatherPrintRequestMessage(
@@ -212,6 +212,8 @@ export interface PrintIdsMessage {
   type: 'print-ids';
   ids: string[];
   reason?: 'no-token' | 'no-range';
+  /** 対象にするチェックイン日（JST, YYYY-MM-DD） */
+  targetStartDate?: string;
 }
 
 export function isPrintIdsMessage(

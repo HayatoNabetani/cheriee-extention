@@ -52,7 +52,12 @@ export default defineContentScript({
     const mapOpts = { staffNames: STAFF_NAMES };
 
     /** 「全て印刷」で再取得中の状態。null=非実行。received=今回取り直して届いたID。 */
-    let pendingFetch: { wanted: string[]; received: Set<string> } | null = null;
+    let pendingFetch: {
+      wanted: string[];
+      received: Set<string>;
+      /** 指定時は、このJST日付にチェックインする予約だけを印刷対象にする。 */
+      targetStartDate?: string;
+    } | null = null;
 
     /** カテゴリID → 店舗表示名（category.name が空だった場合のフォールバック） */
     const CATEGORY_STORE_LABELS: Record<number, string> = {
@@ -147,7 +152,7 @@ export default defineContentScript({
         return;
       }
       if (isPrintIdsMessage(data)) {
-        onPrintIdsGathered(data.ids, data.reason);
+        onPrintIdsGathered(data.ids, data.reason, data.targetStartDate);
         return;
       }
       if (isFetchDoneMessage(data)) {
@@ -272,19 +277,19 @@ export default defineContentScript({
      */
     let gathering = false;
 
-    function startPrintAll(rangeMode?: 'today'): void {
+    function startPrintAll(targetDate?: string): void {
       if (pendingFetch || gathering) return;
       gathering = true;
       showFetchProgress();
       setProgressText(
-        rangeMode === 'today'
-          ? '印刷対象を集計中…（全店舗・ペットホテル・本日）'
+        targetDate
+          ? `印刷対象を集計中…（全店舗・ペットホテル・${targetDate}チェックイン）`
           : '印刷対象を集計中…（全店舗・ペットホテル）',
       );
       const req: GatherPrintRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
         type: 'gather-print-request',
-        ...(rangeMode ? { rangeMode } : {}),
+        ...(targetDate ? { targetDate } : {}),
       };
       window.postMessage(req, window.location.origin);
       window.setTimeout(() => {
@@ -296,10 +301,116 @@ export default defineContentScript({
       }, 30_000);
     }
 
+    /** カレンダー画面用の日付選択。初期値は本日(JST)。 */
+    function openPrintDateDialog(): void {
+      document.getElementById(`${PREFIX}-date-dialog`)?.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = `${PREFIX}-date-dialog`;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: '0',
+        background: 'rgba(0,0,0,.4)',
+        zIndex: '2147483647',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const form = document.createElement('form');
+      Object.assign(form.style, {
+        width: 'min(360px, 90vw)',
+        padding: '20px',
+        borderRadius: '10px',
+        background: '#fff',
+        boxShadow: '0 8px 30px rgba(0,0,0,.35)',
+        fontFamily: '"Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo",sans-serif',
+        color: '#111',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const title = document.createElement('div');
+      title.textContent = 'チェックイン日を選択';
+      Object.assign(title.style, { fontSize: '16px', fontWeight: '700' });
+
+      const note = document.createElement('div');
+      note.textContent = '選択した日にチェックインするホテル予約だけを印刷します。';
+      Object.assign(note.style, {
+        marginTop: '6px',
+        color: '#666',
+        fontSize: '12px',
+      });
+
+      const input = document.createElement('input');
+      input.type = 'date';
+      input.required = true;
+      input.value = jstDateOf(new Date().toISOString()) ?? '';
+      Object.assign(input.style, {
+        display: 'block',
+        width: '100%',
+        boxSizing: 'border-box',
+        marginTop: '16px',
+        padding: '9px 10px',
+        border: '1px solid #ccc',
+        borderRadius: '6px',
+        fontSize: '15px',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const actions = document.createElement('div');
+      Object.assign(actions.style, {
+        display: 'flex',
+        justifyContent: 'flex-end',
+        gap: '8px',
+        marginTop: '18px',
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'キャンセル';
+      const submit = document.createElement('button');
+      submit.type = 'submit';
+      submit.textContent = '予約を表示';
+      for (const button of [cancel, submit]) {
+        Object.assign(button.style, {
+          padding: '8px 14px',
+          border: '1px solid #ccc',
+          borderRadius: '6px',
+          background: '#fff',
+          cursor: 'pointer',
+          fontSize: '13px',
+        } satisfies Partial<CSSStyleDeclaration>);
+      }
+      Object.assign(submit.style, {
+        borderColor: '#2b7de9',
+        background: '#2b7de9',
+        color: '#fff',
+        fontWeight: '600',
+      });
+
+      const close = () => overlay.remove();
+      cancel.addEventListener('click', close);
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) close();
+      });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (!input.value) return;
+        const selectedDate = input.value;
+        close();
+        startPrintAll(selectedDate);
+      });
+
+      actions.append(cancel, submit);
+      form.append(title, note, input, actions);
+      overlay.appendChild(form);
+      document.body.appendChild(overlay);
+      input.focus();
+    }
+
     /** MAIN から全店舗・期間のIDが返ってきた → 詳細取得を開始 */
     function onPrintIdsGathered(
       ids: string[],
       reason?: 'no-token' | 'no-range',
+      targetStartDate?: string,
     ): void {
       if (!gathering) return;
       gathering = false;
@@ -322,7 +433,7 @@ export default defineContentScript({
         alert('対象期間の予約が見つかりませんでした。');
         return;
       }
-      pendingFetch = { wanted: ids, received: new Set() };
+      pendingFetch = { wanted: ids, received: new Set(), targetStartDate };
       updateFetchProgress();
       const req: FetchRequestMessage = {
         source: KARTE_MESSAGE_SOURCE,
@@ -341,6 +452,7 @@ export default defineContentScript({
     function finishPrintAll(errors: number, reason?: 'no-token'): void {
       if (!pendingFetch) return;
       const targetIds = pendingFetch.wanted.slice();
+      const targetStartDate = pendingFetch.targetStartDate;
       const got = pendingFetch.received.size;
       pendingFetch = null;
       hideFetchProgress();
@@ -359,16 +471,42 @@ export default defineContentScript({
       if (errors > 0) {
         console.warn(`[cheriee-karte] 再取得に ${errors} 件失敗しました`);
       }
-      // カテゴリ＝ペットホテル（マッピングで「ホテル」）のものだけに絞る
+      // カテゴリ＝ペットホテル（マッピングで「ホテル」）のものだけに絞る。
+      // 日付指定時は、検索APIが「その日に滞在中」の予約も返すため、startedAt の
+      // JST日付が指定日と一致する予約（＝指定日チェックイン）だけを残す。
       const hotelIds = targetIds.filter((id) => {
         const c = cache.get(id);
-        return !!c && mapResponseToKarte(c.data, mapOpts).category === 'ホテル';
+        return (
+          !!c &&
+          mapResponseToKarte(c.data, mapOpts).category === 'ホテル' &&
+          (!targetStartDate || jstDateOf(c.data.startedAt) === targetStartDate)
+        );
       });
       if (hotelIds.length === 0) {
-        alert('対象期間にペットホテルの予約が見つかりませんでした。');
+        alert(
+          targetStartDate
+            ? '本日チェックインのペットホテル予約が見つかりませんでした。'
+            : '対象期間にペットホテルの予約が見つかりませんでした。',
+        );
         return;
       }
       openBatchDialog(hotelIds);
+    }
+
+    /** ISO日時をJSTの YYYY-MM-DD に変換する。 */
+    function jstDateOf(value: string | undefined): string | null {
+      if (!value) return null;
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return null;
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(date);
+      const get = (type: string) =>
+        parts.find((part) => part.type === type)?.value ?? '';
+      return `${get('year')}-${get('month')}-${get('day')}`;
     }
 
     /* 取得中の進捗オーバーレイ */
@@ -730,10 +868,10 @@ export default defineContentScript({
       batchBtn.textContent = '🖨 ホテル予約印刷';
       batchBtn.title = '一覧の全予約をまとめて印刷します（未取得分は自動取得）';
       style(batchBtn, false);
-      // カレンダー上では表示中の期間に関係なく「本日」のホテル予約を印刷する
-      batchBtn.addEventListener('click', () =>
-        startPrintAll(pageMode() === 'calendar' ? 'today' : undefined),
-      );
+      batchBtn.addEventListener('click', () => {
+        if (pageMode() === 'calendar') openPrintDateDialog();
+        else startPrintAll();
+      });
 
       const singleBtn = document.createElement('button');
       singleBtn.id = `${PREFIX}-single`;
@@ -765,7 +903,7 @@ export default defineContentScript({
         // 全店舗・ペットホテルで印刷するため、検索結果の件数は出さない
         batch.textContent =
           pageMode() === 'calendar'
-            ? '🖨 ホテル予約印刷（本日）'
+            ? '🖨 ホテル予約印刷（日付指定）'
             : '🖨 ホテル予約印刷';
       }
     }
@@ -813,7 +951,7 @@ export default defineContentScript({
     /**
      * 現在ページの種別。
      *  - 'search'  : /schedules/search → 「ホテル予約印刷」（表示中の期間）
-     *  - 'calendar': /schedules/calendar/... → 「ホテル予約印刷（本日）」（本日固定）
+     *  - 'calendar': /schedules/calendar/... → 「ホテル予約印刷（日付指定）」
      *  - 'detail'  : /schedules/{数値id} → 「カルテ印刷」(単票)
      *  - 'other'   : それ以外 → 何も出さない
      */
@@ -938,17 +1076,17 @@ export default defineContentScript({
     }
 
     /** ツールバーへ注入したボタン種別（フローティング表示判断に使う）。null=未注入 */
-    type ToolbarCtx = 'all' | 'all-today' | 'single' | null;
+    type ToolbarCtx = 'all' | 'all-date' | 'single' | null;
 
     function tryInjectToolbar(): ToolbarCtx {
       const mode = pageMode();
       // 出すべきボタンの種別
-      // （search→all / calendar→all-today / detail→single / other→なし）
+      // （search→all / calendar→all-date / detail→single / other→なし）
       const wantCtx: ToolbarCtx =
         mode === 'search'
           ? 'all'
           : mode === 'calendar'
-            ? 'all-today'
+            ? 'all-date'
             : mode === 'detail'
               ? 'single'
               : null;
@@ -966,9 +1104,9 @@ export default defineContentScript({
             ? makeNativeButton('ホテル予約印刷', 'fa-print', () =>
                 startPrintAll(),
               )
-            : wantCtx === 'all-today'
-              ? makeNativeButton('ホテル予約印刷（本日）', 'fa-print', () =>
-                  startPrintAll('today'),
+            : wantCtx === 'all-date'
+              ? makeNativeButton('ホテル予約印刷（日付指定）', 'fa-print', () =>
+                  openPrintDateDialog(),
                 )
               : makeNativeButton('カルテ印刷', 'fa-print', printSingle);
         el.dataset.ctx = wantCtx;
@@ -991,7 +1129,7 @@ export default defineContentScript({
       if (batch) {
         const wantBatch = mode === 'search' || mode === 'calendar';
         batch.style.display =
-          wantBatch && injected !== 'all' && injected !== 'all-today'
+          wantBatch && injected !== 'all' && injected !== 'all-date'
             ? ''
             : 'none';
       }
